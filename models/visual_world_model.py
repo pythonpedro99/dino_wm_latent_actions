@@ -93,8 +93,13 @@ class VWorldModel(nn.Module):
         input :  obs (dict): "visual", "proprio", (b, num_frames, 3, img_size, img_size) 
         output:    z (tensor): (b, num_frames, num_patches, emb_dim)
         """
-        z_dct = self.encode_obs(obs)
-        act_emb = self.encode_act(act)
+        z_dct = self.encode_obs(obs) # z (dict): "visual", "proprio" (b, t, num_patches, encoder_emb_dim)
+
+        # hier LAM integrieren z.B. act_emb = self.latent_action_model(act)
+
+        act_emb = self.encode_act(act) # einfach überspringen/löschen 
+        
+        # remove completely 
         if self.concat_dim == 0:
             z = torch.cat(
                     [z_dct['visual'], z_dct['proprio'].unsqueeze(2), act_emb.unsqueeze(2)], dim=2 # add as an extra token
@@ -107,6 +112,8 @@ class VWorldModel(nn.Module):
             z = torch.cat(
                 [z_dct['visual'], proprio_repeated, act_repeated], dim=3
             )  # (b, num_frames, num_patches, dim + action_dim)
+        
+        # new ecoding: z = z_dct[visual] + action token 
         return z
     
     def encode_act(self, act):
@@ -196,7 +203,9 @@ class VWorldModel(nn.Module):
         """
         loss = 0
         loss_components = {}
-        z = self.encode(obs, act)
+        z = self.encode(obs, act) # Hier LAM integrieren 
+
+
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
         visual_src = obs['visual'][:, : self.num_hist, ...]  # (b, num_hist, 3, img_size, img_size)
