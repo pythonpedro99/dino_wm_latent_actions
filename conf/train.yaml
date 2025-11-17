@@ -43,16 +43,16 @@ training:
 
 img_size: 224 # should be a multiple of 224
 frameskip: 5
-concat_dim: 1
+concat_dim: 1. # change to 0 for concat along token dim, 1 for feature dim #TODO
 
 normalize_action: True
 
 # action encoder
-action_emb_dim: 10
+action_emb_dim: 10 # change to 384 for latent action model
 num_action_repeat: 1
 
 # proprio encoder
-proprio_emb_dim: 10 
+proprio_emb_dim: 10 # change to 384 for latent action model
 num_proprio_repeat: 1
 
 num_hist: 3
