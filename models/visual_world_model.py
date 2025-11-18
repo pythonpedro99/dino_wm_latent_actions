@@ -45,6 +45,7 @@ class VWorldModel(nn.Module):
         self.action_dim = action_dim * num_action_repeat 
         self.emb_dim = self.encoder.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
         self.latent_action_dim = latent_action_dim
+        self.encoder_emb_dim = self.encoder.emb_dim
 
         self.latent_action_down = nn.Linear(self.encoder_emb_dim, self.latent_action_dim)
         self.latent_action_up = nn.Linear(self.latent_action_dim, self.encoder_emb_dim)
@@ -56,9 +57,13 @@ class VWorldModel(nn.Module):
         print(f"action encoder: {action_encoder}")
         print(f"latent_action_model: {self.latent_action_model}")
         print(f"latent_vq_model: {self.latent_vq_model}")
+        print(f"latent_action_down: {self.latent_action_down}")
+        print(f"latent_action_up: {self.latent_action_up}")
+        print(f"latent_action_dim: {self.latent_action_dim}")
         print(f"proprio_dim: {proprio_dim}, after repeat: {self.proprio_dim}")
         print(f"action_dim: {action_dim}, after repeat: {self.action_dim}")
-        print(f"emb_dim: {self.emb_dim}")
+        print(f"encoder_emb_dim: {self.encoder_emb_dim}")
+
 
         self.concat_dim = concat_dim # 0 or 1
         assert concat_dim == 0 or concat_dim == 1, f"concat_dim {concat_dim} not supported."
