@@ -446,7 +446,7 @@ class Trainer:
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
             self.model.train()
-            z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
+            z_out, visual_out, visual_reconstructed, loss, loss_components, encode_output = self.model(
                 obs, act
             )
 

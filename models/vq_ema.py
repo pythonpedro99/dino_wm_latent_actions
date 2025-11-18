@@ -55,4 +55,4 @@ class VectorQuantizerEMA(nn.Module):
         # Straight-through estimator
         z_q_st = z + (z_q - z).detach()
 
-        return z_q_st, loss, indices
+        return {"z_q_st": z_q_st, "loss": loss, "indices": indices}

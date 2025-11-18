@@ -16,6 +16,8 @@ class VWorldModel(nn.Module):
         predictor,
         latent_action_model,
         latent_vq_model,
+        ema_decay=0.99,
+        commitment=0.25,
         proprio_dim=384,
         action_dim=384,
         concat_dim=0,
@@ -36,6 +38,8 @@ class VWorldModel(nn.Module):
         self.predictor = predictor  # predictor could be None
         self.latent_action_model = latent_action_model
         self.latent_vq_model = latent_vq_model
+        self.ema_decay = ema_decay
+        self.commitment = commitment
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder
@@ -115,7 +119,7 @@ class VWorldModel(nn.Module):
         latent_actions = self.latent_action_model(z_dct["visual"])["action_patches"] #(b, t, 1, encoder_emb_dim)
         latent_actions = self.latent_action_down(latent_actions)
         vq_outputs = self.latent_vq_model(latent_actions)
-        quantized_action_patches = vq_outputs["quantized_action_patches"] #(b, t, 1, latent_action_dim)
+        quantized_action_patches = vq_outputs["z_q_st"] #(b, t, 1, latent_action_dim)
         quantized_action_patches = self.latent_action_up(quantized_action_patches)
 
         z_dct["visual"] = z_dct["visual"] + quantized_action_patches
@@ -139,10 +143,10 @@ class VWorldModel(nn.Module):
             z = torch.cat(
                 [z_dct['visual'], proprio_repeated, act_repeated], dim=3
             )  # (b, num_frames, num_patches, dim + action_dim)
-        
-        
-        return z
-    
+
+
+        return {"z": z,"vq_outputs": vq_outputs, "latent_actions": latent_actions}
+
     def encode_act(self, act):
         act = self.action_encoder(act) # (b, num_frames, action_emb_dim)
         return act
@@ -230,8 +234,11 @@ class VWorldModel(nn.Module):
         """
         loss = 0
         loss_components = {}
-        z = self.encode(obs, act) # Hier LAM integrieren 
-
+        encode_output = self.encode(obs, act)  
+        z = encode_output["z"]  # (b, num_frames, num_patches, emb_dim)
+        vq_output = encode_output["vq_outputs"]
+        loss = loss + vq_output["loss"] * self.commitment
+        loss_components["vq_loss"] = vq_output["loss"]
 
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
@@ -304,7 +311,7 @@ class VWorldModel(nn.Module):
         else:
             visual_reconstructed = None
         loss_components["loss"] = loss
-        return z_pred, visual_pred, visual_reconstructed, loss, loss_components
+        return z_pred, visual_pred, visual_reconstructed, loss, loss_components, encode_output
 
     def replace_actions_from_z(self, z, act):
         act_emb = self.encode_act(act)
