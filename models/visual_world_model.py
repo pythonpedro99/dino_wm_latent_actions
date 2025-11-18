@@ -46,6 +46,10 @@ class VWorldModel(nn.Module):
         self.emb_dim = self.encoder.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
         self.latent_action_dim = latent_action_dim
 
+        self.latent_action_down = nn.Linear(self.encoder_emb_dim, self.latent_action_dim)
+        self.latent_action_up = nn.Linear(self.latent_action_dim, self.encoder_emb_dim)
+
+
         print(f"num_action_repeat: {self.num_action_repeat}")
         print(f"num_proprio_repeat: {self.num_proprio_repeat}")
         print(f"proprio encoder: {proprio_encoder}")
@@ -103,13 +107,13 @@ class VWorldModel(nn.Module):
         """
         z_dct = self.encode_obs(obs) # z (dict): "visual", "proprio" (b, t, num_patches, encoder_emb_dim)
 
-        video_action_patches = self.latent_action_model(z_dct["visual"])["video_action_patches"] #(b, t, num_patches, encoder_emb_dim)
-        #TODO project tokens self.latent_action_dim
-        vq_outputs = self.latent_vq_model(visual_action_patches))
-        qunatized_video_action_patches = vq_outputs["quantized_video_action_patches"] #(b, t, num_patches, encoder_emb_dim)
-        # TODO qunatized_video_action_patches -> project to self.encodeer.emb_dim
+        latent_actions = self.latent_action_model(z_dct["visual"])["action_patches"] #(b, t, num_patches, encoder_emb_dim)
+        latent_actions = self.latent_action_down(latent_actions)
+        vq_outputs = self.latent_vq_model(latent_actions)
+        quantized_action_patches = vq_outputs["quantized_action_patches"] #(b, t, num_patches, encoder_emb_dim)
+        quantized_action_patches = self.latent_action_up(quantized_action_patches)
 
-        z_dct["visual"] = qunatized_video_action_patches
+        z_dct["visual"] = z_dct["visual"] + quantized_action_patches
 
         act_emb = self.encode_act(act)
 
@@ -121,6 +125,7 @@ class VWorldModel(nn.Module):
             z = torch.cat(
                     [z_dct['visual'], proprio_token, act_token], dim=2 # add as 2 extra token
                 )  # (b, num_frames, num_patches + 2, dim)
+            
         if self.concat_dim == 1: # not used 
             proprio_tiled = repeat(z_dct['proprio'].unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
