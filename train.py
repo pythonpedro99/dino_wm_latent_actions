@@ -513,7 +513,25 @@ class Trainer:
                 self.action_encoder_optimizer.zero_grad()
             self.latent_optimizer.zero_grad()
 
-            self.accelerator.backward(loss)
+            vq_loss = loss_components.get("vq_loss")
+            prediction_loss = loss
+            retain_graph = False
+            if vq_loss is not None:
+                # The total loss reported by the model already includes the latent
+                # commitment term.  Subtracting it here keeps the first backward
+                # pass identical to what the predictor saw before LAM was added,
+                # while retain_graph=True lets us do a second backward pass so the
+                # latent stack still accumulates the commitment gradients.
+                prediction_loss = loss - vq_loss
+                retain_graph = True
+
+            self.accelerator.backward(prediction_loss, retain_graph=retain_graph)
+            if vq_loss is not None:
+                # vq_loss is produced inside encode(), i.e. before the predictor
+                # is ever called, so this backward only touches the encoder plus
+                # the latent modules.  That means the predictor optimizer never
+                # receives commitment gradients even though we reuse the same graph.
+                self.accelerator.backward(vq_loss)
 
             if self.model.train_encoder:
                 self.encoder_optimizer.step()
