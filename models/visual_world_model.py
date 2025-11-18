@@ -14,16 +14,17 @@ class VWorldModel(nn.Module):
         action_encoder,
         decoder,
         predictor,
-        latent_action_model=None,
-        latent_vq_model=None,
-        proprio_dim=0,
-        action_dim=0,
+        latent_action_model,
+        latent_vq_model,
+        proprio_dim=384,
+        action_dim=384,
         concat_dim=0,
-        num_action_repeat=7,
-        num_proprio_repeat=7,
-        train_encoder=True,
-        train_predictor=False,
-        train_decoder=True,
+        latent_action_dim=32,
+        num_action_repeat=1,
+        num_proprio_repeat=1,
+        train_encoder=False,
+        train_predictor=True,
+        train_decoder=False,
     ):
         super().__init__()
         self.num_hist = num_hist
@@ -43,11 +44,14 @@ class VWorldModel(nn.Module):
         self.proprio_dim = proprio_dim * num_proprio_repeat 
         self.action_dim = action_dim * num_action_repeat 
         self.emb_dim = self.encoder.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
+        self.latent_action_dim = latent_action_dim
 
         print(f"num_action_repeat: {self.num_action_repeat}")
         print(f"num_proprio_repeat: {self.num_proprio_repeat}")
         print(f"proprio encoder: {proprio_encoder}")
         print(f"action encoder: {action_encoder}")
+        print(f"latent_action_model: {self.latent_action_model}")
+        print(f"latent_vq_model: {self.latent_vq_model}")
         print(f"proprio_dim: {proprio_dim}, after repeat: {self.proprio_dim}")
         print(f"action_dim: {action_dim}, after repeat: {self.action_dim}")
         print(f"emb_dim: {self.emb_dim}")
@@ -99,45 +103,25 @@ class VWorldModel(nn.Module):
         """
         z_dct = self.encode_obs(obs) # z (dict): "visual", "proprio" (b, t, num_patches, encoder_emb_dim)
 
-        visual_tokens = z_dct["visual"]
-        lam_active = self.latent_action_model is not None
-        if lam_active:
-            lam_inputs = {
-                "visual_tokens": visual_tokens,
-            }
-            if isinstance(obs, dict) and "visual" in obs:
-                lam_inputs["videos"] = obs["visual"]
-            if act is not None:
-                lam_inputs["actions"] = act
-            lam_outputs = self.latent_action_model(lam_inputs)
-            if isinstance(lam_outputs, dict):
-                visual_tokens = lam_outputs.get("video_action_patches", visual_tokens)
-            else:
-                visual_tokens = lam_outputs
+        video_action_patches = self.latent_action_model(z_dct["visual"])["video_action_patches"] #(b, t, num_patches, encoder_emb_dim)
+        #TODO project tokens self.latent_action_dim
+        vq_outputs = self.latent_vq_model(visual_action_patches))
+        qunatized_video_action_patches = vq_outputs["quantized_video_action_patches"] #(b, t, num_patches, encoder_emb_dim)
+        # TODO qunatized_video_action_patches -> project to self.encodeer.emb_dim
 
-        if self.latent_vq_model is not None:
-            vq_outputs = self.latent_vq_model(visual_tokens)
-            if isinstance(vq_outputs, tuple):
-                visual_tokens = vq_outputs[0]
-            elif isinstance(vq_outputs, dict):
-                visual_tokens = vq_outputs.get("video_action_patches", visual_tokens)
-            else:
-                visual_tokens = vq_outputs
-
-        z_dct["visual"] = visual_tokens
+        z_dct["visual"] = qunatized_video_action_patches
 
         act_emb = self.encode_act(act)
 
         if self.concat_dim == 0:
             proprio_token = z_dct['proprio'].unsqueeze(2)
             act_token = act_emb.unsqueeze(2)
-            if lam_active:
-                proprio_token = torch.zeros_like(proprio_token)
-                act_token = torch.zeros_like(act_token)
+            proprio_token = torch.zeros_like(proprio_token)
+            act_token = torch.zeros_like(act_token)
             z = torch.cat(
-                    [z_dct['visual'], proprio_token, act_token], dim=2 # add as an extra token
+                    [z_dct['visual'], proprio_token, act_token], dim=2 # add as 2 extra token
                 )  # (b, num_frames, num_patches + 2, dim)
-        if self.concat_dim == 1:
+        if self.concat_dim == 1: # not used 
             proprio_tiled = repeat(z_dct['proprio'].unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
             act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
@@ -146,7 +130,7 @@ class VWorldModel(nn.Module):
                 [z_dct['visual'], proprio_repeated, act_repeated], dim=3
             )  # (b, num_frames, num_patches, dim + action_dim)
         
-        # new ecoding: z = z_dct[visual] + action token for each t add to the visual tokens not the last 2 token (proprio/action)
+        
         return z
     
     def encode_act(self, act):
