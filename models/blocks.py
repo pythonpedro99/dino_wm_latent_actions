@@ -38,10 +38,13 @@ class PositionalEncoding(nn.Module):
         div_term = torch.exp(exponent)
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.pos_enc = pe
+        # Register as buffer so the encoding automatically follows the module's device
+        self.register_buffer("pos_enc", pe, persistent=False)
 
     def forward(self, x: Tensor) -> Tensor:
-        return x + self.pos_enc[:x.shape[2]].cuda()
+        # Slice positional encodings to the number of spatial tokens and ensure dtype/device match
+        pos_enc = self.pos_enc[: x.shape[2]].to(dtype=x.dtype, device=x.device)
+        return x + pos_enc
 
 
 class SelfAttention(nn.Module):
