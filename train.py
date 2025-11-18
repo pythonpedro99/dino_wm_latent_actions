@@ -144,9 +144,11 @@ class Trainer:
         self.proprio_encoder = None
         self.predictor = None
         self.decoder = None
+        self.model = None
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
+        self.latent_optimizer = None
         log.info(f"Train encoder, predictor, decoder:\
             {self.cfg.model.train_encoder}\
             {self.cfg.model.train_predictor}\
@@ -292,6 +294,18 @@ class Trainer:
         self.encoder, self.predictor, self.decoder = self.accelerator.prepare(
             self.encoder, self.predictor, self.decoder
         )
+
+        latent_action_model = hydra.utils.instantiate(
+            self.cfg.latent_action_model,
+            in_dim=self.encoder.emb_dim,
+            model_dim=self.encoder.emb_dim,
+            patch_size=getattr(self.encoder, "patch_size", 1),
+        ).to(self.device)
+
+        latent_vq_model = hydra.utils.instantiate(
+            self.cfg.latent_vq_model,
+        ).to(self.device)
+
         self.model = hydra.utils.instantiate(
             self.cfg.model,
             encoder=self.encoder,
@@ -304,7 +318,11 @@ class Trainer:
             concat_dim=self.cfg.concat_dim,
             num_action_repeat=self.cfg.num_action_repeat,
             num_proprio_repeat=self.cfg.num_proprio_repeat,
+            latent_action_model=latent_action_model,
+            latent_vq_model=latent_vq_model,
         )
+        self.model.latent_action_down = self.model.latent_action_down.to(self.device)
+        self.model.latent_action_up = self.model.latent_action_up.to(self.device)
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(
@@ -336,6 +354,18 @@ class Trainer:
                 self.decoder.parameters(), lr=self.cfg.training.decoder_lr
             )
             self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
+
+        latent_params = itertools.chain(
+            self.model.latent_action_model.parameters(),
+            self.model.latent_vq_model.parameters(),
+            self.model.latent_action_down.parameters(),
+            self.model.latent_action_up.parameters(),
+        )
+        self.latent_optimizer = torch.optim.AdamW(
+            latent_params,
+            lr=self.cfg.training.latent_lr,
+        )
+        self.latent_optimizer = self.accelerator.prepare(self.latent_optimizer)
 
     def monitor_jobs(self, lock):
         """
@@ -456,6 +486,7 @@ class Trainer:
             if self.cfg.has_predictor:
                 self.predictor_optimizer.zero_grad()
                 self.action_encoder_optimizer.zero_grad()
+            self.latent_optimizer.zero_grad()
 
             self.accelerator.backward(loss)
 
@@ -466,6 +497,7 @@ class Trainer:
             if self.cfg.has_predictor and self.model.train_predictor:
                 self.predictor_optimizer.step()
                 self.action_encoder_optimizer.step()
+            self.latent_optimizer.step()
 
             loss = self.accelerator.gather_for_metrics(loss).mean()
 
