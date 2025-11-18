@@ -2,6 +2,7 @@ import os
 import time
 import hydra
 import torch
+import torch.nn as nn
 import wandb
 import logging
 import warnings
@@ -145,6 +146,10 @@ class Trainer:
         self.predictor = None
         self.decoder = None
         self.model = None
+        self.latent_action_model = None
+        self.latent_vq_model = None
+        self.latent_action_down = None
+        self.latent_action_up = None
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
@@ -169,7 +174,13 @@ class Trainer:
             ["decoder", "decoder_optimizer"] if self.train_decoder else []
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
-        # TODO save latent model and vq model
+        self._keys_to_save += [
+            "latent_action_model",
+            "latent_vq_model",
+            "latent_action_down",
+            "latent_action_up",
+            "latent_optimizer",
+        ]
         self.init_models()
         self.init_optimizers()
 
@@ -295,16 +306,28 @@ class Trainer:
             self.encoder, self.predictor, self.decoder
         )
 
-        latent_action_model = hydra.utils.instantiate(
-            self.cfg.latent_action_model,
-            in_dim=self.encoder.emb_dim,
-            model_dim=self.encoder.emb_dim,
-            patch_size=getattr(self.encoder, "patch_size", 1),
-        ).to(self.device)
+        if self.latent_action_model is None:
+            self.latent_action_model = hydra.utils.instantiate(
+                self.cfg.latent_action_model,
+                in_dim=self.encoder.emb_dim,
+                model_dim=self.encoder.emb_dim,
+                patch_size=getattr(self.encoder, "patch_size", 1),
+            )
+        self.latent_action_model = self.latent_action_model.to(self.device)
 
-        latent_vq_model = hydra.utils.instantiate(
-            self.cfg.latent_vq_model,
-        ).to(self.device)
+        if self.latent_vq_model is None:
+            self.latent_vq_model = hydra.utils.instantiate(
+                self.cfg.latent_vq_model,
+            )
+        self.latent_vq_model = self.latent_vq_model.to(self.device)
+
+        latent_dim = self.cfg.model.latent_action_dim
+        if self.latent_action_down is None:
+            self.latent_action_down = nn.Linear(self.encoder.emb_dim, latent_dim)
+        if self.latent_action_up is None:
+            self.latent_action_up = nn.Linear(latent_dim, self.encoder.emb_dim)
+        self.latent_action_down = self.latent_action_down.to(self.device)
+        self.latent_action_up = self.latent_action_up.to(self.device)
 
         self.model = hydra.utils.instantiate(
             self.cfg.model,
@@ -318,8 +341,10 @@ class Trainer:
             concat_dim=self.cfg.concat_dim,
             num_action_repeat=self.cfg.num_action_repeat,
             num_proprio_repeat=self.cfg.num_proprio_repeat,
-            latent_action_model=latent_action_model,
-            latent_vq_model=latent_vq_model,
+            latent_action_model=self.latent_action_model,
+            latent_vq_model=self.latent_vq_model,
+            latent_action_down=self.latent_action_down,
+            latent_action_up=self.latent_action_up,
         )
         self.model.latent_action_down = self.model.latent_action_down.to(self.device)
         self.model.latent_action_up = self.model.latent_action_up.to(self.device)
@@ -356,10 +381,10 @@ class Trainer:
             self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
 
         latent_params = itertools.chain(
-            self.model.latent_action_model.parameters(),
-            self.model.latent_vq_model.parameters(),
-            self.model.latent_action_down.parameters(),
-            self.model.latent_action_up.parameters(),
+            self.latent_action_model.parameters(),
+            self.latent_vq_model.parameters(),
+            self.latent_action_down.parameters(),
+            self.latent_action_up.parameters(),
         )
         self.latent_optimizer = torch.optim.AdamW(
             latent_params,
