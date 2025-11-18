@@ -446,7 +446,7 @@ class Trainer:
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
             self.model.train()
-            z_out, visual_out, visual_reconstructed, loss, loss_components, encode_output = self.model(
+            z_out, visual_out, visual_reconstructed, loss, loss_components, _ = self.model(
                 obs, act
             )
 
@@ -535,6 +535,7 @@ class Trainer:
             self.logs_update(loss_components)
 
     def val(self):
+        metrics = {}  # 'TODO: to avoid empty metrics error'
         self.model.eval()
         if len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
             with torch.no_grad():
@@ -558,7 +559,7 @@ class Trainer:
             obs, act, state = data
             plot = i == 0
             self.model.eval()
-            z_out, visual_out, visual_reconstructed, loss, loss_components = self.model(
+            z_out, visual_out, visual_reconstructed, loss, loss_components, encode_output = self.model(
                 obs, act
             )
 
@@ -568,6 +569,8 @@ class Trainer:
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
+
+            # TODO add and compute metrices here
 
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
