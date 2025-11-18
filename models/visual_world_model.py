@@ -38,8 +38,6 @@ class VWorldModel(nn.Module):
         self.predictor = predictor  # predictor could be None
         self.latent_action_model = latent_action_model
         self.latent_vq_model = latent_vq_model
-        self.ema_decay = ema_decay
-        self.commitment = commitment
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder

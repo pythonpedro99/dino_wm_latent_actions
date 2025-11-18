@@ -148,7 +148,7 @@ class Trainer:
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
-        self.latent_optimizer = None
+        self.latent_optimizer = None  # TODO why separate optimizer?
         log.info(f"Train encoder, predictor, decoder:\
             {self.cfg.model.train_encoder}\
             {self.cfg.model.train_predictor}\
@@ -169,7 +169,7 @@ class Trainer:
             ["decoder", "decoder_optimizer"] if self.train_decoder else []
         )
         self._keys_to_save += ["action_encoder", "proprio_encoder"]
-
+        # TODO save latent model and vq model
         self.init_models()
         self.init_optimizers()
 
