@@ -514,16 +514,10 @@ class Trainer:
             self.latent_optimizer.zero_grad()
 
             vq_loss = loss_components.get("vq_loss")
+            retain_graph = vq_loss is not None
+            # VQ loss is returned separately by the model, so prediction_loss
+            # contains only the terms meant to drive the predictor/decoder.
             prediction_loss = loss
-            retain_graph = False
-            if vq_loss is not None:
-                # The total loss reported by the model already includes the latent
-                # commitment term.  Subtracting it here keeps the first backward
-                # pass identical to what the predictor saw before LAM was added,
-                # while retain_graph=True lets us do a second backward pass so the
-                # latent stack still accumulates the commitment gradients.
-                prediction_loss = loss - vq_loss
-                retain_graph = True
 
             self.accelerator.backward(prediction_loss, retain_graph=retain_graph)
             if vq_loss is not None:
