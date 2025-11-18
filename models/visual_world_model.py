@@ -235,7 +235,6 @@ class VWorldModel(nn.Module):
         encode_output = self.encode(obs, act)  
         z = encode_output["z"]  # (b, num_frames, num_patches, emb_dim)
         vq_output = encode_output["vq_outputs"]
-        loss = loss + vq_output["loss"]
         loss_components["vq_loss"] = vq_output["loss"]
 
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)

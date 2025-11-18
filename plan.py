@@ -4,6 +4,7 @@ import json
 import hydra
 import random
 import torch
+import torch.nn as nn
 import pickle
 import wandb
 import logging
@@ -30,6 +31,10 @@ ALL_MODEL_KEYS = [
     "decoder",
     "proprio_encoder",
     "action_encoder",
+    "latent_action_model",
+    "latent_vq_model",
+    "latent_action_down",
+    "latent_action_up",
 ]
 
 def planning_main_in_dir(working_dir, cfg_dict):
@@ -393,6 +398,24 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
     elif not train_cfg.has_decoder:
         result["decoder"] = None
 
+    encoder_emb_dim = result["encoder"].emb_dim
+    latent_dim = train_cfg.model.latent_action_dim
+    if "latent_action_model" not in result:
+        result["latent_action_model"] = hydra.utils.instantiate(
+            train_cfg.latent_action_model,
+            in_dim=encoder_emb_dim,
+            model_dim=encoder_emb_dim,
+            patch_size=getattr(result["encoder"], "patch_size", 1),
+        )
+    if "latent_vq_model" not in result:
+        result["latent_vq_model"] = hydra.utils.instantiate(
+            train_cfg.latent_vq_model,
+        )
+    if "latent_action_down" not in result:
+        result["latent_action_down"] = nn.Linear(encoder_emb_dim, latent_dim)
+    if "latent_action_up" not in result:
+        result["latent_action_up"] = nn.Linear(latent_dim, encoder_emb_dim)
+
     model = hydra.utils.instantiate(
         train_cfg.model,
         encoder=result["encoder"],
@@ -405,6 +428,10 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
         concat_dim=train_cfg.concat_dim,
         num_action_repeat=num_action_repeat,
         num_proprio_repeat=train_cfg.num_proprio_repeat,
+        latent_action_model=result["latent_action_model"],
+        latent_vq_model=result["latent_vq_model"],
+        latent_action_down=result["latent_action_down"],
+        latent_action_up=result["latent_action_up"],
     )
     model.to(device)
     return model
