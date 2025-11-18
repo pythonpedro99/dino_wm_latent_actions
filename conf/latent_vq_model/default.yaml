@@ -1,5 +1,5 @@
 _target_: models.vq_ema.VectorQuantizerEMA
-num_codes: 512
+num_codes: 9
 code_dim: ${model.latent_action_dim}
 ema_decay: ${model.ema_decay}
 commitment: ${model.commitment}

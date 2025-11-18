@@ -1,6 +1,6 @@
 _target_: models.lam.LatentActionModel
 latent_dim: ${model.latent_action_dim}
-enc_blocks: 4
+enc_blocks: 12
 dec_blocks: 0
-num_heads: 8
+num_heads: 6
 dropout: 0.0
