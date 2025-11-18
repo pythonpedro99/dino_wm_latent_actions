@@ -16,6 +16,8 @@ class VWorldModel(nn.Module):
         predictor,
         latent_action_model,
         latent_vq_model,
+        latent_action_down,
+        latent_action_up,
         ema_decay=0.99,
         commitment=0.25,
         proprio_dim=384,
@@ -38,6 +40,8 @@ class VWorldModel(nn.Module):
         self.predictor = predictor  # predictor could be None
         self.latent_action_model = latent_action_model
         self.latent_vq_model = latent_vq_model
+        self.latent_action_down = latent_action_down
+        self.latent_action_up = latent_action_up
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder
@@ -48,10 +52,6 @@ class VWorldModel(nn.Module):
         self.emb_dim = self.encoder.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
         self.latent_action_dim = latent_action_dim
         self.encoder_emb_dim = self.encoder.emb_dim
-
-        self.latent_action_down = nn.Linear(self.encoder_emb_dim, self.latent_action_dim)
-        self.latent_action_up = nn.Linear(self.latent_action_dim, self.encoder_emb_dim)
-
 
         print(f"num_action_repeat: {self.num_action_repeat}")
         print(f"num_proprio_repeat: {self.num_proprio_repeat}")
