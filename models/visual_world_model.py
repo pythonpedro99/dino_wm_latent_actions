@@ -107,10 +107,10 @@ class VWorldModel(nn.Module):
         """
         z_dct = self.encode_obs(obs) # z (dict): "visual", "proprio" (b, t, num_patches, encoder_emb_dim)
 
-        latent_actions = self.latent_action_model(z_dct["visual"])["action_patches"] #(b, t, num_patches, encoder_emb_dim)
+        latent_actions = self.latent_action_model(z_dct["visual"])["action_patches"] #(b, t, 1, encoder_emb_dim)
         latent_actions = self.latent_action_down(latent_actions)
         vq_outputs = self.latent_vq_model(latent_actions)
-        quantized_action_patches = vq_outputs["quantized_action_patches"] #(b, t, num_patches, encoder_emb_dim)
+        quantized_action_patches = vq_outputs["quantized_action_patches"] #(b, t, 1, latent_action_dim)
         quantized_action_patches = self.latent_action_up(quantized_action_patches)
 
         z_dct["visual"] = z_dct["visual"] + quantized_action_patches
