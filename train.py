@@ -634,7 +634,6 @@ class Trainer:
             self.logs_update(loss_components)
 
     def val(self):
-        metrics = {}  # 'TODO: to avoid empty metrics error'
         self.model.eval()
         if self.latent_metric_analyzer is not None and self.accelerator.is_main_process:
             self.latent_metric_analyzer.reset()
@@ -671,7 +670,6 @@ class Trainer:
                 key: value.mean().item() for key, value in loss_components.items()
             }
 
-            # TODO add and compute metrices here
             self._maybe_update_latent_metrics(
                 encode_output=encode_output,
                 act=act,
