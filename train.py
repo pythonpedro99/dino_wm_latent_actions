@@ -343,21 +343,28 @@ class Trainer:
                 model_dim=self.encoder.emb_dim,
                 patch_size=getattr(self.encoder, "patch_size", 1),
             )
-        self.latent_action_model = self.latent_action_model.to(self.device)
-
         if self.latent_vq_model is None:
             self.latent_vq_model = hydra.utils.instantiate(
                 self.cfg.latent_vq_model,
             )
-        self.latent_vq_model = self.latent_vq_model.to(self.device)
 
         latent_dim = self.cfg.model.latent_action_dim
         if self.latent_action_down is None:
             self.latent_action_down = nn.Linear(self.encoder.emb_dim, latent_dim)
         if self.latent_action_up is None:
             self.latent_action_up = nn.Linear(latent_dim, self.encoder.emb_dim)
-        self.latent_action_down = self.latent_action_down.to(self.device)
-        self.latent_action_up = self.latent_action_up.to(self.device)
+
+        (
+            self.latent_action_model,
+            self.latent_vq_model,
+            self.latent_action_down,
+            self.latent_action_up,
+        ) = self.accelerator.prepare(
+            self.latent_action_model,
+            self.latent_vq_model,
+            self.latent_action_down,
+            self.latent_action_up,
+        )
 
         self.model = hydra.utils.instantiate(
             self.cfg.model,
