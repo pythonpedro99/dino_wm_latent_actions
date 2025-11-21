@@ -219,7 +219,7 @@ class SpatioTemporalTransformer(nn.Module):
             num_blocks: int,
             num_heads: int,
             dropout: float = 0.0,
-            causal_temporal: bool = False
+            causal_temporal: bool = True
     ) -> None:
         super(SpatioTemporalTransformer, self).__init__()
         self.ffn = nn.Sequential(
