@@ -44,6 +44,8 @@ def knn_mutual_information(x: np.ndarray, y: np.ndarray, k: int, rng: np.random.
     n = min(x.shape[0], y.shape[0])
     if n == 0:
         return float("nan")
+    if n <= k:
+        return float("nan")
     x = x[:n]
     y = y[:n]
     if n > 10000:
@@ -53,13 +55,18 @@ def knn_mutual_information(x: np.ndarray, y: np.ndarray, k: int, rng: np.random.
 
     xy = np.concatenate([x, y], axis=1)
     dist_xy = _pairwise_chebyshev(xy)
-    kth = np.partition(dist_xy, kth=k, axis=1)[:, k] + 1e-10
+    np.fill_diagonal(dist_xy, np.inf)
+    kth = np.partition(dist_xy, kth=k - 1, axis=1)[:, k - 1]
+    kth = kth + 1e-10
 
     dist_x = _pairwise_chebyshev(x)
     dist_y = _pairwise_chebyshev(y)
 
-    nx = (dist_x < kth[:, None]).sum(axis=1) - 1
-    ny = (dist_y < kth[:, None]).sum(axis=1) - 1
+    np.fill_diagonal(dist_x, np.inf)
+    np.fill_diagonal(dist_y, np.inf)
+
+    nx = (dist_x < kth[:, None]).sum(axis=1)
+    ny = (dist_y < kth[:, None]).sum(axis=1)
     nx = np.maximum(nx, 0)
     ny = np.maximum(ny, 0)
 
@@ -67,15 +74,19 @@ def knn_mutual_information(x: np.ndarray, y: np.ndarray, k: int, rng: np.random.
 
 
 def knn_consistency(features: np.ndarray, labels: np.ndarray, k: int, rng: np.random.Generator, max_samples: int) -> float:
-    if features.shape[0] <= k + 1:
+    if features.shape[0] <= k:
         return float("nan")
     features, indices = _sample_with_indices(features, max_samples, rng)
     labels = labels[indices]
+    if features.shape[0] <= k:
+        return float("nan")
     dist = _pairwise_l2(features)
-    nn_indices = np.argpartition(dist, kth=k + 1, axis=1)[:, 1 : k + 1]
+    np.fill_diagonal(dist, np.inf)
+    nn_indices = np.argpartition(dist, kth=k - 1, axis=1)[:, :k]
     neighbor_labels = labels[nn_indices]
     matches = (neighbor_labels == labels[:, None]).mean(axis=1)
     return float(np.mean(matches))
+
 
 
 def compute_class_variances(features: np.ndarray, labels: np.ndarray) -> Tuple[float, float]:
