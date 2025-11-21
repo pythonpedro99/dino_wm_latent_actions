@@ -736,6 +736,29 @@ class Trainer:
             loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
 
+        if self.latent_metric_analyzer is not None and self.accelerator.is_main_process:
+            latent_metrics, latent_tables, latent_figs = self.latent_metric_analyzer.compute()
+            for key, value in latent_metrics.items():
+                if math.isnan(value):
+                    continue
+                self.logs_update({f"val_{key}": [value]})
+            if self.wandb_run is not None:
+                for table_name, rows in latent_tables.items():
+                    if not rows:
+                        continue
+                    columns = list(rows[0].keys())
+                    table = wandb.Table(columns=columns)
+                    for row in rows:
+                        table.add_data(*[row[col] for col in columns])
+                    self.wandb_run.log({f"val_{table_name}": table, "epoch": self.epoch})
+                for fig_name, fig in latent_figs.items():
+                    if fig is None:
+                        continue
+                    self.wandb_run.log(
+                        {f"val_{fig_name}": wandb.Image(fig), "epoch": self.epoch}
+                    )
+                    plt.close(fig)
+
     def openloop_rollout(
         self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
     ):
@@ -824,34 +847,6 @@ class Trainer:
         logs = {
             key: sum(values) / len(values) for key, values in logs.items() if values
         }
-
-        if (
-            self.latent_metric_analyzer is not None
-            and self.accelerator.is_main_process
-        ):
-            latent_metrics, latent_tables, latent_figs = (
-                self.latent_metric_analyzer.compute()
-            )
-            for key, value in latent_metrics.items():
-                if math.isnan(value):
-                    continue
-                self.logs_update({f"val_{key}": [value]})
-            if self.wandb_run is not None:
-                for table_name, rows in latent_tables.items():
-                    if not rows:
-                        continue
-                    columns = list(rows[0].keys())
-                    table = wandb.Table(columns=columns)
-                    for row in rows:
-                        table.add_data(*[row[col] for col in columns])
-                    self.wandb_run.log({f"val_{table_name}": table, "epoch": self.epoch})
-                for fig_name, fig in latent_figs.items():
-                    if fig is None:
-                        continue
-                    self.wandb_run.log(
-                        {f"val_{fig_name}": wandb.Image(fig), "epoch": self.epoch}
-                    )
-                    plt.close(fig)
 
         return logs
 
