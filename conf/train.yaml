@@ -78,10 +78,20 @@ model:
 debug: False 
 
 # Planning params for planning eval jobs launched during training
-plan_settings: 
+plan_settings:
   # plan_cfg_path: conf/plan.yaml # set to null for no planning evals
-  plan_cfg_path: null 
+  plan_cfg_path: null
   planner: ['gd', 'cem']
   goal_source: ['dset', 'random_state']
   goal_H: [5]
   alpha: [0.1, 1]
+
+metrics:
+  enabled: True
+  max_samples: 4096
+  mi_k: 5
+  knn_k: 10
+  action_round_decimals: 3
+  umap_points: 2000
+  umap_neighbors: 15
+  umap_min_dist: 0.1

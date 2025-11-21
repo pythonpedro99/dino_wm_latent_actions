@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import hydra
 import torch
 import torch.nn as nn
@@ -9,6 +10,7 @@ import warnings
 import threading
 import itertools
 import numpy as np
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 from omegaconf import OmegaConf, open_dict
 from einops import rearrange
@@ -22,6 +24,7 @@ from hydra.core.hydra_config import HydraConfig
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
+from metrics.latent_metrics import LatentMetricsAggregator, LatentMetricsConfig
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 
 warnings.filterwarnings("ignore")
@@ -154,6 +157,7 @@ class Trainer:
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
         self.latent_optimizer = None  # TODO why separate optimizer?
+        self.latent_metric_analyzer = None
         log.info(f"Train encoder, predictor, decoder:\
             {self.cfg.model.train_encoder}\
             {self.cfg.model.train_predictor}\
@@ -182,6 +186,7 @@ class Trainer:
             "latent_optimizer",
         ]
         self.init_models()
+        self._init_latent_metric_analyzer()
         self.init_optimizers()
 
         self.epoch_log = OrderedDict()
@@ -214,6 +219,31 @@ class Trainer:
         not_in_ckpt = set(self._keys_to_save) - set(ckpt.keys())
         if len(not_in_ckpt):
             log.warning("Keys not found in ckpt: %s", not_in_ckpt)
+
+    def _init_latent_metric_analyzer(self):
+        metrics_cfg = getattr(self.cfg, "metrics", None)
+        if metrics_cfg is None or not metrics_cfg.get("enabled", False):
+            self.latent_metric_analyzer = None
+            return
+
+        num_codes = getattr(self.latent_vq_model, "num_codes", None)
+        if num_codes is None:
+            log.warning("latent_vq_model is missing num_codes. Disabling latent metrics.")
+            self.latent_metric_analyzer = None
+            return
+
+        config = LatentMetricsConfig(
+            num_codes=num_codes,
+            max_samples=metrics_cfg.get("max_samples", 4096),
+            mi_k=metrics_cfg.get("mi_k", 5),
+            knn_k=metrics_cfg.get("knn_k", 10),
+            action_round_decimals=metrics_cfg.get("action_round_decimals", 3),
+            umap_points=metrics_cfg.get("umap_points", 2000),
+            umap_neighbors=metrics_cfg.get("umap_neighbors", 15),
+            umap_min_dist=metrics_cfg.get("umap_min_dist", 0.1),
+            seed=self.cfg.training.seed,
+        )
+        self.latent_metric_analyzer = LatentMetricsAggregator(config)
 
     def init_models(self):
         model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
@@ -606,6 +636,8 @@ class Trainer:
     def val(self):
         metrics = {}  # 'TODO: to avoid empty metrics error'
         self.model.eval()
+        if self.latent_metric_analyzer is not None and self.accelerator.is_main_process:
+            self.latent_metric_analyzer.reset()
         if len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
             with torch.no_grad():
                 train_rollout_logs = self.openloop_rollout(
@@ -640,6 +672,11 @@ class Trainer:
             }
 
             # TODO add and compute metrices here
+            self._maybe_update_latent_metrics(
+                encode_output=encode_output,
+                act=act,
+                z_out=z_out,
+            )
 
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
@@ -789,6 +826,35 @@ class Trainer:
         logs = {
             key: sum(values) / len(values) for key, values in logs.items() if values
         }
+
+        if (
+            self.latent_metric_analyzer is not None
+            and self.accelerator.is_main_process
+        ):
+            latent_metrics, latent_tables, latent_figs = (
+                self.latent_metric_analyzer.compute()
+            )
+            for key, value in latent_metrics.items():
+                if math.isnan(value):
+                    continue
+                self.logs_update({f"val_{key}": [value]})
+            if self.wandb_run is not None:
+                for table_name, rows in latent_tables.items():
+                    if not rows:
+                        continue
+                    columns = list(rows[0].keys())
+                    table = wandb.Table(columns=columns)
+                    for row in rows:
+                        table.add_data(*[row[col] for col in columns])
+                    self.wandb_run.log({f"val_{table_name}": table, "epoch": self.epoch})
+                for fig_name, fig in latent_figs.items():
+                    if fig is None:
+                        continue
+                    self.wandb_run.log(
+                        {f"val_{fig_name}": wandb.Image(fig), "epoch": self.epoch}
+                    )
+                    plt.close(fig)
+
         return logs
 
     def logs_update(self, logs):
@@ -815,6 +881,61 @@ class Trainer:
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
         self.epoch_log = OrderedDict()
+
+    def _maybe_update_latent_metrics(self, encode_output, act, z_out):
+        if self.latent_metric_analyzer is None:
+            return
+
+        with torch.no_grad():
+            latent_actions = encode_output["latent_actions"].detach()
+            quantized_actions = encode_output["vq_outputs"]["z_q_st"].detach()
+            vq_indices = encode_output["vq_outputs"]["indices"].detach()
+            state_repr = encode_output["visual_embs"].detach().mean(dim=2)
+            actions = act.detach()
+
+            per_step_errors = None
+            per_step_actions = None
+            if self.cfg.has_predictor and z_out is not None:
+                z_obs_out, _ = self.model.separate_emb(z_out.detach())
+                z_pred_visual = z_obs_out["visual"]
+                z_tgt_full = encode_output["z"].detach()[:, self.model.num_pred :, :, :]
+                z_tgt_obs, _ = self.model.separate_emb(z_tgt_full)
+                z_tgt_visual = z_tgt_obs["visual"]
+                per_step_errors = ((z_pred_visual - z_tgt_visual) ** 2).mean(dim=(2, 3))
+                per_step_actions = act[:, self.model.num_pred :, :].detach()
+
+            gathered = {
+                "latent_actions": self.accelerator.gather_for_metrics(latent_actions),
+                "quantized_actions": self.accelerator.gather_for_metrics(quantized_actions),
+                "actions": self.accelerator.gather_for_metrics(actions),
+                "state_repr": self.accelerator.gather_for_metrics(state_repr),
+                "vq_indices": self.accelerator.gather_for_metrics(
+                    vq_indices.view(latent_actions.shape[0], -1)
+                ),
+                "per_step_errors": self.accelerator.gather_for_metrics(per_step_errors)
+                if per_step_errors is not None
+                else None,
+                "per_step_actions": self.accelerator.gather_for_metrics(per_step_actions)
+                if per_step_actions is not None
+                else None,
+            }
+
+        if not self.accelerator.is_main_process:
+            return
+
+        self.latent_metric_analyzer.update(
+            latent_actions=gathered["latent_actions"].cpu(),
+            quantized_actions=gathered["quantized_actions"].cpu(),
+            actions=gathered["actions"].cpu(),
+            state_repr=gathered["state_repr"].cpu(),
+            code_indices=gathered["vq_indices"].cpu(),
+            per_step_errors=gathered["per_step_errors"].cpu()
+            if gathered["per_step_errors"] is not None
+            else None,
+            per_step_error_actions=gathered["per_step_actions"].cpu()
+            if gathered["per_step_actions"] is not None
+            else None,
+        )
 
     def plot_samples(
         self,
