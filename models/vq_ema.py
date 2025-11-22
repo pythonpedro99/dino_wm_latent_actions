@@ -41,12 +41,12 @@ class VectorQuantizerEMA(nn.Module):
                 )
                 embed_sum = flat.t() @ enc_one_hot
                 self.embedding_avg.mul_(self.ema_decay).add_(
-                    (1 - self.ema_decay) * embed_sum
+                    (1 - self.ema_decay) * embed_sum.t()
                 )
 
                 n = self.cluster_size.sum()
                 cluster_size = (self.cluster_size + 1e-6) / (n + self.num_codes * 1e-6)
-                embed_normalized = self.embedding_avg / cluster_size.unsqueeze(0)
+                embed_normalized = self.embedding_avg / cluster_size.unsqueeze(1)
                 self.embedding.data.copy_(embed_normalized.t())
 
         # Commitment loss
