@@ -25,6 +25,8 @@ dependencies:
       # Core training
       - accelerate
       - einops
+      - submitit
+
 
       # Config system
       - hydra-core
