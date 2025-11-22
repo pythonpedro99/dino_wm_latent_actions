@@ -27,7 +27,7 @@ class PushTDataset(TrajDataset):
         normalize_action: bool = True,
         relative=True,
         action_scale=100.0,
-        with_velocity: bool = True, # agent's velocity
+        with_velocity: bool = False, # agent's velocity
     ):  
         self.data_path = Path(data_path)
         self.transform = transform
@@ -36,7 +36,7 @@ class PushTDataset(TrajDataset):
         self.states = torch.load(self.data_path / "states.pth")
         self.states = self.states.float()
         if relative:
-            self.actions = torch.load(self.data_path / "rel_actions.pth")
+            self.actions = torch.load(self.data_path / "rel_actions_discretized_kmeans_k9.pth")
         else:
             self.actions = torch.load(self.data_path / "abs_actions.pth")
         self.actions = self.actions.float()
