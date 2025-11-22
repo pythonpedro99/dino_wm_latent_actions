@@ -33,10 +33,10 @@ class PushTDataset(TrajDataset):
         self.transform = transform
         self.relative = relative
         self.normalize_action = normalize_action
-        self.states = torch.load(self.data_path / "states.pth")
+        self.states = torch.load(self.data_path / "states_constant.pth")
         self.states = self.states.float()
         if relative:
-            self.actions = torch.load(self.data_path / "rel_actions.pth")
+            self.actions = torch.load(self.data_path / "rel_actions_discretized_kmeans_k9.pth")
         else:
             self.actions = torch.load(self.data_path / "abs_actions.pth")
         self.actions = self.actions.float()

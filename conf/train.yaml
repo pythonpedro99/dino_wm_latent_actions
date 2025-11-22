@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - env: point_maze
+  - env: pusht
   - encoder: dino 
   - action_encoder: proprio
   - proprio_encoder: proprio
@@ -31,8 +31,8 @@ hydra:
 
 training:
   seed: 0
-  epochs: 100
-  batch_size: 32 # should >= nodes * tasks_per_node
+  epochs: 1
+  batch_size: 12 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
@@ -43,22 +43,22 @@ training:
 
 img_size: 224 # should be a multiple of 224
 frameskip: 5
-concat_dim: 1
+concat_dim: 0
 
 normalize_action: True
 
 # action encoder
-action_emb_dim: 10
+action_emb_dim: 384
 num_action_repeat: 1
 
 # proprio encoder
-proprio_emb_dim: 10 
+proprio_emb_dim: 384 
 num_proprio_repeat: 1
 
 num_hist: 3
 num_pred: 1 # only supports 1
 has_predictor: True # set this to False for only training a decoder
-has_decoder: True # set this to False for only training a predictor
+has_decoder: False # set this to False for only training a predictor
 
 model:
   _target_: models.visual_world_model.VWorldModel
@@ -67,7 +67,7 @@ model:
   num_pred: ${num_pred}
   train_encoder: False
   train_predictor: True
-  train_decoder: True
+  train_decoder: False
 
 debug: False 
 
