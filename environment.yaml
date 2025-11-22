@@ -3,13 +3,14 @@ channels:
   - pytorch
   - nvidia
   - conda-forge
-dependencies:
-  - python=3.9
 
-  # --- PyTorch (CONDA, works with CUDA 12.2 base image) ---
+dependencies:
+  - python=3.10
+
+  # --- PyTorch ---
   - pytorch=2.3.0
   - torchvision=0.18.0
-  - pytorch-cuda=12.1  # compatible with CUDA 12.2 container
+  - pytorch-cuda=12.1
 
   # --- Core scientific stack ---
   - numpy
@@ -19,14 +20,23 @@ dependencies:
   - tqdm
   - psutil
   - ffmpeg
+
+  # --- Heavy packages moved to conda (stable) ---
+  - pygame
+  - pymunk
+  - shapely
+  - opencv
+  - scikit-image
+  - pyyaml
+
+  # pip needed for other Python-only packages
   - pip
 
   - pip:
       # Core training
       - accelerate
       - einops
-      - submitit
-
+      - hydra-submitit-launcher
 
       # Config system
       - hydra-core
@@ -38,20 +48,10 @@ dependencies:
       # Planning
       - gym==0.23.1
       - submitit
-      - imageio-ffmpeg
 
-      # Vectorized env
+      # Video IO
+      - imageio-ffmpeg
       - cloudpickle
 
       # Dataset loaders
-      - decord
-      - pyyaml
-
-      # PushT environment
-      - pygame
-      - pymunk
-      - shapely
-      - opencv-python
-      - scikit-image
-
-
+      - decord     # pip version → works in colab
