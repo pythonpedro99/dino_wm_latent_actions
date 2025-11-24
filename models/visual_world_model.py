@@ -309,40 +309,44 @@ class VWorldModel(nn.Module):
         return z_pred, visual_pred, visual_reconstructed, loss, loss_components, encode_output
 
     def replace_actions_from_z(self, z, act):
-        act_emb = self.encode_act(act)
         if self.concat_dim == 0:
-            z[:, :, -1, :] = act_emb
+            z[:, :, -1, :] = act
         elif self.concat_dim == 1:
-            act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z.shape[2])
+            act_tiled = repeat(act.unsqueeze(2), "b t 1 a -> b t f a", f=z.shape[2])
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
             z[..., -self.action_dim:] = act_repeated
         return z
 
 
-    def rollout(self, obs_0, act):
+
+    def rollout(self, obs, act, num_obs_init):
         """
-        input:  obs_0 (dict): (b, n, 3, img_size, img_size)
-                  act: (b, t+n, action_dim)
-        output: embeddings of rollout obs
-                visuals: (b, t+n+1, 3, img_size, img_size)
-                z: (b, t+n+1, num_patches, emb_dim)
+        input:
+            obs  (dict): (b, t+n, 3, H, W)  # FULL trajectory
+            act  (tensor): ignored (API compatibility)
+            num_obs_init (int): how many initial frames act as context
+
+        output:
+            z_obses, z
         """
-        num_obs_init = obs_0['visual'].shape[1]
-        act_0 = act[:, :num_obs_init]
-        action = act[:, num_obs_init:] 
-        encode_output = self.encode(obs_0, act_0)
-        z = encode_output["z"]
+        encode_output = self.encode(obs, act)
+        quantized_latent_actions = encode_output["quantized_latent_actions"]
+
+        z = encode_output["z"][:, :num_obs_init]
+        action = quantized_latent_actions[:, num_obs_init:]
+
         t = 0
         inc = 1
         while t < action.shape[1]:
-            z_pred = self.predict(z[:, -self.num_hist :])
+            z_pred = self.predict(z[:, -self.num_hist:])
             z_new = z_pred[:, -inc:, ...]
-            z_new = self.replace_actions_from_z(z_new, action[:, t : t + inc, :])
+            z_new = self.replace_actions_from_z(z_new, action[:, t:t + inc, :])
             z = torch.cat([z, z_new], dim=1)
             t += inc
 
-        z_pred = self.predict(z[:, -self.num_hist :])
-        z_new = z_pred[:, -1 :, ...] # take only the next pred
+        z_pred = self.predict(z[:, -self.num_hist:])
+        z_new = z_pred[:, -1:, ...]
         z = torch.cat([z, z_new], dim=1)
+
         z_obses, z_acts = self.separate_emb(z)
         return z_obses, z
