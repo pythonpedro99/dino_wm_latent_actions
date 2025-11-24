@@ -119,7 +119,7 @@ class VWorldModel(nn.Module):
         vq_outputs = self.latent_vq_model(latent_actions)
         quantized_action_patches = vq_outputs["z_q_st"] #(b, t, 1, latent_action_dim)
         #quantized_action_patches = self.latent_action_up(quantized_action_patches)
-        #visual_embeds = z_dct["visual"]
+        visual_embeds = z_dct["visual"]
         #z_dct["visual"] = z_dct["visual"] + quantized_action_patches
 
         act_emb = quantized_action_patches #self.encode_act(act)
@@ -334,7 +334,8 @@ class VWorldModel(nn.Module):
         num_obs_init = obs_0['visual'].shape[1]
         act_0 = act[:, :num_obs_init]
         action = act[:, num_obs_init:] 
-        z = self.encode(obs_0, act_0)
+        encode_output = self.encode(obs_0, act_0)
+        z = encode_output["z"]
         t = 0
         inc = 1
         while t < action.shape[1]:
