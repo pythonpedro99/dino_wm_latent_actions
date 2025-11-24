@@ -43,12 +43,12 @@ training:
 
 img_size: 224 # should be a multiple of 224
 frameskip: 5
-concat_dim: 0
+concat_dim: 1
 
 normalize_action: True
 
 # action encoder
-action_emb_dim: 384
+action_emb_dim: 10
 num_action_repeat: 1
 
 # proprio encoder
