@@ -112,31 +112,35 @@ class VWorldModel(nn.Module):
 
         latent_actions = self.latent_action_model(z_dct["visual"])["action_patches"]
         latent_actions = self.latent_action_down(latent_actions)
-        vq_outputs = self.latent_vq_model(latent_actions)
-        quantized = vq_outputs["z_q_st"]
+        latent_actions = torch.cat(
+            [latent_actions[:, 1:, :, :], latent_actions[:, -1:, :, :]],
+            dim=1
+        )
 
-        act_emb_shifted = torch.cat([quantized[:, 1:, :, :], quantized[:, -1:, :, :]], dim=1)
-        act_emb = act_emb_shifted.squeeze(2)
+        vq_outputs = self.latent_vq_model(latent_actions)
+        quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)
 
         proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))
 
         if self.concat_dim == 0:
-            act_token = act_emb.unsqueeze(2)
+            act_token = quantized_latent_actions.unsqueeze(2)
             z = torch.cat([z_dct["visual"], proprio_token, act_token], dim=2)
 
         if self.concat_dim == 1:
-            proprio_tiled = repeat(proprio_token, "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
+            proprio_tiled = repeat(proprio_token, "b t 1 a -> b t f a", f=z_dct["visual"].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
-            act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
+            act_tiled = repeat(quantized_latent_actions.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct["visual"].shape[2])
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
             z = torch.cat([z_dct['visual'], proprio_repeated, act_repeated], dim=3)
 
         return {
             "z": z,
             "vq_outputs": vq_outputs,
-            "latent_actions_shifted": act_emb,
+            "latent_actions": latent_actions.squeeze(2),
+            "quantized_latent_actions": quantized_latent_actions,
             "visual_embs": z_dct["visual"]
         }
+
 
 
     def encode_act(self, act):
