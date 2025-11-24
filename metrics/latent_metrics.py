@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 
 
 def _pairwise_chebyshev(x: np.ndarray) -> np.ndarray:
@@ -329,11 +330,99 @@ class LatentMetricsAggregator:
             "per_action_overlap_max": float(overlaps.max()),
         }
 
+    def _plot_heatmap(
+        self,
+        matrix: np.ndarray,
+        x_labels: List[int],
+        y_labels: List[int],
+        title: str,
+        xlabel: str,
+        ylabel: str,
+        colorbar_label: Optional[str] = None,
+    ) -> "matplotlib.figure.Figure":
+        fig, ax = plt.subplots(figsize=(6, 5))
+        im = ax.imshow(matrix, aspect="auto", cmap="magma")
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        if colorbar_label:
+            cbar.set_label(colorbar_label)
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        ax.set_xticks(range(len(x_labels)))
+        ax.set_xticklabels([str(x) for x in x_labels], rotation=45, ha="right")
+        ax.set_yticks(range(len(y_labels)))
+        ax.set_yticklabels([str(y) for y in y_labels])
+        fig.tight_layout()
+        return fig
+
+    def _confusion_figure(self, rows: List[Dict[str, int]]) -> Optional["matplotlib.figure.Figure"]:
+        if not rows:
+            return None
+        codes = sorted({int(row["code"]) for row in rows})
+        actions = sorted({int(row["action"]) for row in rows})
+        code_index = {code: idx for idx, code in enumerate(codes)}
+        action_index = {action: idx for idx, action in enumerate(actions)}
+        matrix = np.zeros((len(actions), len(codes)))
+        for row in rows:
+            a_idx = action_index[int(row["action"])]
+            c_idx = code_index[int(row["code"])]
+            matrix[a_idx, c_idx] = row["count"]
+        return self._plot_heatmap(
+            matrix,
+            x_labels=codes,
+            y_labels=actions,
+            title="Code–Action Confusion",
+            xlabel="Code",
+            ylabel="Action",
+            colorbar_label="Count",
+        )
+
+    def _label_distribution_figure(
+        self, rows: List[Dict[str, float]]
+    ) -> Optional["matplotlib.figure.Figure"]:
+        if not rows:
+            return None
+        codes = sorted({int(row["code"]) for row in rows})
+        actions = sorted({int(row["action"]) for row in rows})
+        code_index = {code: idx for idx, code in enumerate(codes)}
+        action_index = {action: idx for idx, action in enumerate(actions)}
+        matrix = np.zeros((len(actions), len(codes)))
+        for row in rows:
+            a_idx = action_index[int(row["action"])]
+            c_idx = code_index[int(row["code"])]
+            matrix[a_idx, c_idx] = row["prob"]
+        return self._plot_heatmap(
+            matrix,
+            x_labels=codes,
+            y_labels=actions,
+            title="Per-Code Label Distribution",
+            xlabel="Code",
+            ylabel="Action",
+            colorbar_label="Probability",
+        )
+
+    def _per_action_error_figure(
+        self, rows: List[Dict[str, float]]
+    ) -> Optional["matplotlib.figure.Figure"]:
+        if not rows:
+            return None
+        actions = sorted({int(row["action"]) for row in rows})
+        action_to_error = {int(row["action"]): row["next_state_error"] for row in rows}
+        errors = [action_to_error[action] for action in actions]
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.bar(range(len(actions)), errors, color="tab:blue")
+        ax.set_xticks(range(len(actions)))
+        ax.set_xticklabels([str(a) for a in actions], rotation=45, ha="right")
+        ax.set_xlabel("Action")
+        ax.set_ylabel("Next-state error")
+        ax.set_title("Per-Action Next-State Error")
+        fig.tight_layout()
+        return fig
+
     def _compute_umap(self, features: np.ndarray, labels: np.ndarray, prefix: str) -> Optional["matplotlib.figure.Figure"]:
         if features.shape[0] == 0:
             return None
         try:
-            import matplotlib.pyplot as plt
             import umap
         except Exception:
             return None
@@ -429,12 +518,21 @@ class LatentMetricsAggregator:
         if per_action_rows:
             tables["per_action_next_state_error"] = per_action_rows
 
-        tables["code_action_confusion"] = self._build_confusion_table(codes, labels)
+        metrics.update(self._compute_usage_overlap(codes, labels))
+
+        confusion_rows = self._build_confusion_table(codes, labels)
+        tables["code_action_confusion"] = confusion_rows
+        confusion_fig = self._confusion_figure(confusion_rows)
+        if confusion_fig is not None:
+            figures["code_action_confusion"] = confusion_fig
+
         label_rows, label_stats = self._build_label_distribution(codes, labels)
         if label_rows:
             tables["per_code_label_distribution"] = label_rows
         metrics.update(label_stats)
-        metrics.update(self._compute_usage_overlap(codes, labels))
+        label_fig = self._label_distribution_figure(label_rows)
+        if label_fig is not None:
+            figures["per_code_label_distribution"] = label_fig
 
         umap_a = self._compute_umap(z_a, labels, prefix="z_a")
         umap_q = self._compute_umap(z_q, labels, prefix="z_q")
@@ -442,5 +540,10 @@ class LatentMetricsAggregator:
             figures["umap_z_a"] = umap_a
         if umap_q is not None:
             figures["umap_z_q"] = umap_q
+
+        if per_action_rows:
+            per_action_fig = self._per_action_error_figure(per_action_rows)
+            if per_action_fig is not None:
+                figures["per_action_next_state_error"] = per_action_fig
 
         return metrics, tables, figures
