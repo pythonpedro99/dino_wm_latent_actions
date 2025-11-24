@@ -44,6 +44,8 @@ dependencies:
 
       # Logging
       - wandb
+      - umap-learn
+
 
       # Planning
       - gym==0.23.1
