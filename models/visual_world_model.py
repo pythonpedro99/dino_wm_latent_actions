@@ -306,6 +306,9 @@ class VWorldModel(nn.Module):
 
     def replace_actions_from_z(self, z, act):
         act_emb = self.encode_act(act)
+        return self._insert_action_embedding(z, act_emb)
+
+    def _insert_action_embedding(self, z, act_emb):
         if self.concat_dim == 0:
             z[:, :, -1, :] = act_emb
         elif self.concat_dim == 1:
@@ -315,25 +318,30 @@ class VWorldModel(nn.Module):
         return z
 
 
-    def rollout(self, obs_0, act):
+    def rollout(self, obs_0, act, full_obs):
         """
         input:  obs_0 (dict): (b, n, 3, img_size, img_size)
                   act: (b, t+n, action_dim)
+                  full_obs: full observation sequence used for latent action encoding
         output: embeddings of rollout obs
                 visuals: (b, t+n+1, 3, img_size, img_size)
                 z: (b, t+n+1, num_patches, emb_dim)
         """
         num_obs_init = obs_0['visual'].shape[1]
-        act_0 = act[:, :num_obs_init]
-        action = act[:, num_obs_init:] 
-        encode_output = self.encode(obs_0, act_0)
-        z = encode_output["z"]
+        action = act[:, num_obs_init:]
+        padded_actions = torch.cat([act, act[:, -1:, :]], dim=1)
+        encode_output = self.encode(full_obs, padded_actions)
+        action_emb = self.latent_action_up(encode_output["latent_actions_shifted"])
+        z = encode_output["z"][:, :num_obs_init]
         t = 0
         inc = 1
         while t < action.shape[1]:
             z_pred = self.predict(z[:, -self.num_hist :])
             z_new = z_pred[:, -inc:, ...]
-            z_new = self.replace_actions_from_z(z_new, action[:, t : t + inc, :])
+            action_slice = action_emb[
+                :, num_obs_init + t : num_obs_init + t + inc, :
+            ]
+            z_new = self._insert_action_embedding(z_new, action_slice)
             z = torch.cat([z, z_new], dim=1)
             t += inc
 

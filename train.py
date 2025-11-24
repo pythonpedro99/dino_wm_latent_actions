@@ -833,7 +833,13 @@ class Trainer:
                         obs[k][:n_past].unsqueeze(0).to(self.device)
                     )  # unsqueeze for batch, (b, t, c, h, w)
 
-                z_obses, z = self.model.rollout(obs_0, actions)
+                full_obs = {k: v.unsqueeze(0).to(self.device) for k, v in obs.items()}
+
+                z_obses, z = self.model.rollout(
+                    obs_0,
+                    actions,
+                    full_obs,
+                )
                 z_obs_last = slice_trajdict_with_t(z_obses, start_idx=-1, end_idx=None)
                 div_loss = self.err_eval_single(z_obs_last, z_g)
 
