@@ -772,8 +772,8 @@ class Trainer:
                     plt.close(fig)
 
     def openloop_rollout(
-        self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
-    ):
+            self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
+        ):
         np.random.seed(self.cfg.training.seed)
         min_horizon = min_horizon + self.cfg.num_hist
         plotting_dir = f"rollout_plots/e{self.epoch}_rollout"
@@ -782,10 +782,8 @@ class Trainer:
         self.accelerator.wait_for_everyone()
         logs = {}
 
-        # rollout with both num_hist and 1 frame as context
         num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
 
-        # sample traj
         for idx in range(num_rollout):
             valid_traj = False
             while not valid_traj:
@@ -811,8 +809,8 @@ class Trainer:
 
             for k in obs.keys():
                 obs[k] = obs[k][
-                    start : 
-                    start + horizon * self.cfg.frameskip + 1 : 
+                    start :
+                    start + horizon * self.cfg.frameskip + 1 :
                     self.cfg.frameskip
                 ]
             act = act[start : start + horizon * self.cfg.frameskip]
@@ -827,26 +825,20 @@ class Trainer:
             for past in num_past:
                 n_past, postfix = past
 
-                obs_0 = {}
+                obs_full = {}
                 for k in obs.keys():
-                    obs_0[k] = (
-                        obs[k][:n_past].unsqueeze(0).to(self.device)
-                    )  # unsqueeze for batch, (b, t, c, h, w)
+                    obs_full[k] = obs[k].unsqueeze(0).to(self.device)
 
-                z_obses, z = self.model.rollout(obs_0, actions)
+                z_obses, z = self.model.rollout(obs_full, actions, num_obs_init=n_past)
                 z_obs_last = slice_trajdict_with_t(z_obses, start_idx=-1, end_idx=None)
                 div_loss = self.err_eval_single(z_obs_last, z_g)
 
                 for k in div_loss.keys():
                     log_key = f"z_{k}_err_rollout{postfix}"
                     if log_key in logs:
-                        logs[f"z_{k}_err_rollout{postfix}"].append(
-                            div_loss[k]
-                        )
+                        logs[f"z_{k}_err_rollout{postfix}"].append(div_loss[k])
                     else:
-                        logs[f"z_{k}_err_rollout{postfix}"] = [
-                            div_loss[k]
-                        ]
+                        logs[f"z_{k}_err_rollout{postfix}"] = [div_loss[k]]
 
                 if self.cfg.has_decoder:
                     visuals = self.model.decode_obs(z_obses)[0]["visual"]
@@ -856,10 +848,12 @@ class Trainer:
                         obs["visual"].shape[0],
                         f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}.png",
                     )
+
         logs = {
             key: sum(values) / len(values) for key, values in logs.items() if values
         }
         return logs
+
 
     def logs_update(self, logs):
         for key, value in logs.items():
