@@ -886,7 +886,7 @@ class Trainer:
 
         with torch.no_grad():
             latent_actions = encode_output["latent_actions"].detach()
-            quantized_actions = encode_output["vq_outputs"]["z_q_st"].detach()
+            quantized_actions = encode_output["quantized_latent_actions"].detach()
             vq_indices = encode_output["vq_outputs"]["indices"].detach()
             state_repr = encode_output["visual_embs"].detach().mean(dim=2)
             actions = act.detach()
