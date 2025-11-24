@@ -107,45 +107,37 @@ class VWorldModel(nn.Module):
         if self.decoder is not None:
             self.decoder.eval()
 
-    def encode(self, obs, act): 
-        """
-        input :  obs (dict): "visual", "proprio", (b, num_frames, 3, img_size, img_size) 
-        output:    z (tensor): (b, num_frames, num_patches, emb_dim)
-        """
-        z_dct = self.encode_obs(obs) # z (dict): "visual", "proprio" (b, t, num_patches, encoder_emb_dim)
+    def encode(self, obs, act):
+        z_dct = self.encode_obs(obs)
 
-        latent_actions = self.latent_action_model(z_dct["visual"])["action_patches"] #(b, t, 1, encoder_emb_dim)
+        latent_actions = self.latent_action_model(z_dct["visual"])["action_patches"]
         latent_actions = self.latent_action_down(latent_actions)
         vq_outputs = self.latent_vq_model(latent_actions)
-        quantized_action_patches = vq_outputs["z_q_st"] #(b, t, 1, latent_action_dim)
-        #quantized_action_patches = self.latent_action_up(quantized_action_patches)
-        visual_embeds = z_dct["visual"]
-        #z_dct["visual"] = z_dct["visual"] + quantized_action_patches
+        quantized = vq_outputs["z_q_st"]
 
-        act_emb = quantized_action_patches #self.encode_act(act)
-        proprio_token = z_dct['proprio'].unsqueeze(2)
-        proprio_token = torch.zeros_like(proprio_token)
+        act_emb_shifted = torch.cat([quantized[:, 1:, :, :], quantized[:, -1:, :, :]], dim=1)
+        act_emb = act_emb_shifted.squeeze(2)
+
+        proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))
 
         if self.concat_dim == 0:
-            proprio_token = z_dct['proprio'].unsqueeze(2)
             act_token = act_emb.unsqueeze(2)
-            proprio_token = torch.zeros_like(proprio_token)
-            #act_token = torch.zeros_like(act_token)
-            z = torch.cat(
-                    [z_dct['visual'], proprio_token, act_token], dim=2 # add as 2 extra token
-                )  # (b, num_frames, num_patches + 2, dim)
-            
-        if self.concat_dim == 1: # not used 
+            z = torch.cat([z_dct["visual"], proprio_token, act_token], dim=2)
+
+        if self.concat_dim == 1:
             proprio_tiled = repeat(proprio_token, "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
             act_tiled = repeat(act_emb.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
-            z = torch.cat(
-                [z_dct['visual'], proprio_repeated, act_repeated], dim=3
-            )  # (b, num_frames, num_patches, dim + action_dim)
+            z = torch.cat([z_dct['visual'], proprio_repeated, act_repeated], dim=3)
 
+        return {
+            "z": z,
+            "vq_outputs": vq_outputs,
+            "latent_actions_shifted": act_emb,
+            "visual_embs": z_dct["visual"]
+        }
 
-        return {"z": z,"vq_outputs": vq_outputs, "latent_actions": latent_actions,"visual_embs": visual_embeds}
 
     def encode_act(self, act):
         act = self.action_encoder(act) # (b, num_frames, action_emb_dim)
