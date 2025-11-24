@@ -11,12 +11,35 @@ from typing import Optional, Callable, Any
 decord.bridge.set_bridge("torch")
 
 # precomputed dataset stats
-ACTION_MEAN = torch.tensor([-0.0087, 0.0068])
-ACTION_STD = torch.tensor([0.2019, 0.2002])
-STATE_MEAN = torch.tensor([236.6155, 264.5674, 255.1307, 266.3721, 1.9584, -2.93032027,  2.54307914])
-STATE_STD = torch.tensor([101.1202, 87.0112, 52.7054, 57.4971, 1.7556, 74.84556075, 74.14009094])
-PROPRIO_MEAN = torch.tensor([236.6155, 264.5674, -2.93032027,  2.54307914])
-PROPRIO_STD = torch.tensor([101.1202, 87.0112, 74.84556075, 74.14009094])
+ACTION_MEAN = torch.tensor([-0.00757417, 0.00833888], dtype=torch.float32)
+ACTION_STD  = torch.tensor([0.18500997, 0.18254188], dtype=torch.float32)
+
+STATE_MEAN = torch.tensor([
+    228.80013047,
+    292.23928572,
+    243.38166685,
+    275.10615822,
+    2.13491690
+], dtype=torch.float32)
+
+STATE_STD = torch.tensor([
+    103.37505838,
+    98.88583176,
+    72.14114198,
+    73.42942474,
+    1.92691758
+], dtype=torch.float32)
+
+PROPRIO_MEAN = torch.tensor([
+    228.80013047,
+    292.23928572
+], dtype=torch.float32)
+
+PROPRIO_STD = torch.tensor([
+    103.37505838,
+    98.88583176
+], dtype=torch.float32)
+
 
 class PushTDataset(TrajDataset):
     def __init__(
