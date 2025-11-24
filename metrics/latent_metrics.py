@@ -180,15 +180,53 @@ class LatentMetricsAggregator:
             if quantized_actions.ndim == 4:
                 quantized_actions = quantized_actions.squeeze(2)
 
-            if latent_actions.shape[1] < 2:
+            time_dim = min(
+                latent_actions.shape[1],
+                quantized_actions.shape[1],
+                actions.shape[1],
+                state_repr.shape[1],
+                code_indices.shape[1],
+            )
+
+            # The final action token is a placeholder; restrict aggregation to the
+            # first t-1 steps to keep representations, codes, and ground-truth
+            # actions aligned.
+            if time_dim < 2:
                 return
 
-            z_a = latent_actions[:, :-1, :].reshape(-1, latent_actions.shape[-1]).cpu().numpy()
-            z_q = quantized_actions[:, :-1, :].reshape(-1, quantized_actions.shape[-1]).cpu().numpy()
-            act_curr = actions[:, :-1, :].reshape(-1, actions.shape[-1]).cpu().numpy()
-            state_t = state_repr[:, :-1, :].reshape(-1, state_repr.shape[-1]).cpu().numpy()
-            state_tp1 = state_repr[:, 1:, :].reshape(-1, state_repr.shape[-1]).cpu().numpy()
-            codes = code_indices[:, :-1].reshape(-1).cpu().numpy()
+            valid_steps = time_dim - 1
+
+            z_a = (
+                latent_actions[:, :valid_steps, :]
+                .reshape(-1, latent_actions.shape[-1])
+                .cpu()
+                .numpy()
+            )
+            z_q = (
+                quantized_actions[:, :valid_steps, :]
+                .reshape(-1, quantized_actions.shape[-1])
+                .cpu()
+                .numpy()
+            )
+            act_curr = (
+                actions[:, :valid_steps, :]
+                .reshape(-1, actions.shape[-1])
+                .cpu()
+                .numpy()
+            )
+            state_t = (
+                state_repr[:, :valid_steps, :]
+                .reshape(-1, state_repr.shape[-1])
+                .cpu()
+                .numpy()
+            )
+            state_tp1 = (
+                state_repr[:, 1 : valid_steps + 1, :]
+                .reshape(-1, state_repr.shape[-1])
+                .cpu()
+                .numpy()
+            )
+            codes = code_indices[:, :valid_steps].reshape(-1).cpu().numpy()
             labels = self._actions_to_labels(act_curr)
 
             self.latent_actions.append(z_a)
@@ -200,8 +238,14 @@ class LatentMetricsAggregator:
             self.code_indices.append(codes)
 
             if per_step_errors is not None and per_step_error_actions is not None:
-                errors = per_step_errors.reshape(-1).cpu().numpy()
-                error_actions = per_step_error_actions.reshape(-1, per_step_error_actions.shape[-1]).cpu().numpy()
+                error_steps = min(valid_steps, per_step_errors.shape[1], per_step_error_actions.shape[1])
+                errors = per_step_errors[:, :error_steps].reshape(-1).cpu().numpy()
+                error_actions = (
+                    per_step_error_actions[:, :error_steps, :]
+                    .reshape(-1, per_step_error_actions.shape[-1])
+                    .cpu()
+                    .numpy()
+                )
                 error_labels = self._actions_to_labels(error_actions)
                 self.pred_errors.append(errors)
                 self.pred_error_labels.append(error_labels)
