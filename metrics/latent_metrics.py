@@ -2,7 +2,7 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-
+from sklearn.preprocessing import StandardScaler
 import numpy as np
 import torch
 
@@ -358,35 +358,97 @@ class LatentMetricsAggregator:
         return fig
 
 
-    def _compute_umap(self, features: np.ndarray, labels: np.ndarray, prefix: str) -> Optional["matplotlib.figure.Figure"]:
-        if features.shape[0] == 0:
-            return None
+    from sklearn.preprocessing import StandardScaler
+
+    def _compute_umap_triplet(
+    self,
+    z_a: np.ndarray,
+    z_q: np.ndarray,
+    labels: np.ndarray,
+) -> Tuple[
+    Optional["matplotlib.figure.Figure"],
+    Optional["matplotlib.figure.Figure"],
+    Optional["matplotlib.figure.Figure"],
+]:
+
+        assert labels.ndim == 1
+        assert labels.shape[0] % 5 == 0
+
+        N_full = labels.shape[0] // 5
+        labels_5 = labels.reshape(N_full, 5)
+
+        labels_composite = []
+        for row in labels_5:
+            vals, counts = np.unique(row, return_counts=True)
+            max_count = counts.max()
+            majority = vals[counts == max_count]
+            if majority.size == 1:
+                labels_composite.append(majority[0])
+            else:
+                labels_composite.append(row[0])
+        labels_composite = np.array(labels_composite, dtype=int)
+
+        assert z_a.shape[0] == N_full
+        assert z_q.shape[0] == N_full
+
+        N = min(N_full, self.config.umap_points)
+        if N_full <= N:
+            idx = np.arange(N_full)
+        else:
+            idx = self.rng.permutation(N_full)[:N]
+
+        z_a_s = z_a[idx]
+        z_q_s = z_q[idx]
+        lbl_comp_s = labels_composite[idx]
+
+        scaler_a = StandardScaler().fit(z_a_s)
+        z_a_s = scaler_a.transform(z_a_s)
+
+        scaler_q = StandardScaler().fit(z_q_s)
+        z_q_s = scaler_q.transform(z_q_s)
+
+        chunk_dim = z_q.shape[1] // 5
+        z_q_split = z_q_s.reshape(N, 5, chunk_dim).reshape(N * 5, chunk_dim)
+        lbl_split = labels_5[idx].reshape(-1)
+
         try:
             import matplotlib.pyplot as plt
             import umap
         except Exception:
-            return None
+            return None, None, None
 
-        sample_features, indices = _sample_with_indices(
-            features, self.config.umap_points, self.rng
-        )
-        sample_labels = labels[indices]
         reducer = umap.UMAP(
             n_neighbors=self.config.umap_neighbors,
             min_dist=self.config.umap_min_dist,
             random_state=self.config.seed,
+            metric="euclidean",
         )
-        embedding = reducer.fit_transform(sample_features)
-        fig, ax = plt.subplots(figsize=(6, 5))
-        scatter = ax.scatter(
-            embedding[:, 0], embedding[:, 1], c=sample_labels, cmap="tab20", s=6, alpha=0.8
-        )
-        ax.set_title(f"UMAP {prefix}")
-        ax.set_xlabel("UMAP-1")
-        ax.set_ylabel("UMAP-2")
-        fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04)
-        fig.tight_layout()
-        return fig
+
+        emb_a = reducer.fit_transform(z_a_s)
+        emb_q = reducer.fit_transform(z_q_s)
+        emb_q_split = reducer.fit_transform(z_q_split)
+
+        fig_a, ax = plt.subplots(figsize=(6, 5))
+        sc = ax.scatter(emb_a[:, 0], emb_a[:, 1], c=lbl_comp_s, cmap="tab10", s=6, alpha=0.8)
+        ax.set_title("UMAP z_a")
+        fig_a.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        fig_a.tight_layout()
+
+        fig_q, ax = plt.subplots(figsize=(6, 5))
+        sc = ax.scatter(emb_q[:, 0], emb_q[:, 1], c=lbl_comp_s, cmap="tab10", s=6, alpha=0.8)
+        ax.set_title("UMAP z_q")
+        fig_q.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        fig_q.tight_layout()
+
+        fig_qs, ax = plt.subplots(figsize=(6, 5))
+        sc = ax.scatter(emb_q_split[:, 0], emb_q_split[:, 1], c=lbl_split, cmap="tab10", s=6, alpha=0.8)
+        ax.set_title("UMAP z_q split")
+        fig_qs.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        fig_qs.tight_layout()
+
+        return fig_a, fig_q, fig_qs
+
+
 
     def _compute_per_action_errors(self) -> Tuple[float, Dict[int, float]]:
         if not self.pred_errors:
@@ -567,11 +629,13 @@ class LatentMetricsAggregator:
         metrics.update(label_stats)
         metrics.update(self._compute_usage_overlap(codes, code_labels))
 
-        umap_a = self._compute_umap(z_a, labels, prefix="z_a")
-        umap_q = self._compute_umap(z_q, labels, prefix="z_q")
-        if umap_a is not None:
-            figures["umap_z_a"] = umap_a
-        if umap_q is not None:
-            figures["umap_z_q"] = umap_q
+        fig_a, fig_q, fig_qs = self._compute_umap_triplet(z_a, z_q, labels)
+        if fig_a is not None:
+            figures["umap_z_a"] = fig_a
+        if fig_q is not None:
+            figures["umap_z_q"] = fig_q
+        if fig_qs is not None:
+            figures["umap_z_q_split"] = fig_qs
+
 
         return metrics, tables, figures
