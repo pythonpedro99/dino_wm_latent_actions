@@ -18,8 +18,8 @@ class VWorldModel(nn.Module):
         latent_vq_model,
         latent_action_down,
         latent_action_up,
-        ema_decay=0.99,
-        commitment=0.25,
+        codebook_splits=None,
+        codebook_dim=None,
         proprio_dim=384,
         action_dim=384,
         concat_dim=0,
@@ -52,6 +52,8 @@ class VWorldModel(nn.Module):
         self.emb_dim = self.encoder.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
         self.latent_action_dim = latent_action_dim
         self.encoder_emb_dim = self.encoder.emb_dim
+        self.codebook_splits = codebook_splits
+        self.codebook_dim = codebook_dim
 
         print(f"num_action_repeat: {self.num_action_repeat}")
         print(f"num_proprio_repeat: {self.num_proprio_repeat}")

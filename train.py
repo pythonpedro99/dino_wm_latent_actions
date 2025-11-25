@@ -681,7 +681,7 @@ class Trainer:
                 key: value.mean().item() for key, value in loss_components.items()
             }
 
-            self._maybe_update_latent_metrics(
+            self.update_latent_metrics(
                 encode_output=encode_output,
                 act=act,
                 z_out=z_out,
@@ -884,7 +884,7 @@ class Trainer:
             self.wandb_run.log(epoch_log)
         self.epoch_log = OrderedDict()
 
-    def _maybe_update_latent_metrics(self, encode_output, act, z_out):
+    def update_latent_metrics(self, encode_output, act, z_out):
         if self.latent_metric_analyzer is None:
             return
 
