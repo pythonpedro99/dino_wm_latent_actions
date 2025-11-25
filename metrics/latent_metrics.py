@@ -1,5 +1,5 @@
 import math
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -280,36 +280,6 @@ class LatentMetricsAggregator:
             "bits_per_action": float(entropy),
         }
 
-    def _build_confusion_table(self, codes: np.ndarray, labels: np.ndarray) -> List[Dict[str, int]]:
-        counter = Counter(zip(codes.tolist(), labels.tolist()))
-        rows = []
-        for (code, label), count in counter.items():
-            rows.append({"code": code, "action": label, "count": count})
-        return rows
-
-    def _build_label_distribution(self, codes: np.ndarray, labels: np.ndarray) -> Tuple[List[Dict[str, float]], Dict[str, float]]:
-        per_code = defaultdict(list)
-        for code, label in zip(codes.tolist(), labels.tolist()):
-            per_code[code].append(label)
-
-        rows: List[Dict[str, float]] = []
-        entropies = []
-        for code, label_list in per_code.items():
-            counts = Counter(label_list)
-            total = sum(counts.values())
-            probs = np.array([c / total for c in counts.values()])
-            entropy = -np.sum(probs * np.log2(probs)) if probs.size else 0.0
-            entropies.append(entropy)
-            for label, count in counts.items():
-                rows.append({"code": code, "action": label, "prob": count / total})
-
-        stats = {
-            "code_label_entropy_mean": float(np.mean(entropies)) if entropies else float("nan"),
-            "code_label_entropy_min": float(np.min(entropies)) if entropies else float("nan"),
-            "code_label_entropy_max": float(np.max(entropies)) if entropies else float("nan"),
-        }
-        return rows, stats
-
     def _compute_usage_overlap(self, codes: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
         per_action_codes = defaultdict(set)
         for code, label in zip(codes.tolist(), labels.tolist()):
@@ -370,17 +340,116 @@ class LatentMetricsAggregator:
         fig.tight_layout()
         return fig
 
-    def _compute_per_action_errors(self) -> Tuple[float, List[Dict[str, float]]]:
+    def _compute_per_action_errors(self) -> Tuple[float, Dict[int, float]]:
         if not self.pred_errors:
-            return float("nan"), []
+            return float("nan"), {}
         errors = self._stack(self.pred_errors)
         labels = self._stack(self.pred_error_labels)
         overall = float(np.mean(errors)) if errors.size else float("nan")
-        rows = []
+        per_action = {}
         for label in np.unique(labels):
             mask = labels == label
-            rows.append({"action": int(label), "next_state_error": float(errors[mask].mean())})
-        return overall, rows
+            per_action[int(label)] = float(errors[mask].mean())
+        return overall, per_action
+
+    def _plot_heatmap(
+        self,
+        matrix: np.ndarray,
+        x_labels: List[str],
+        y_labels: List[str],
+        title: str,
+        cbar_label: str,
+        cmap: str = "magma",
+    ) -> Optional["matplotlib.figure.Figure"]:
+        if matrix.size == 0:
+            return None
+        try:
+            import matplotlib.pyplot as plt
+        except Exception:
+            return None
+
+        fig, ax = plt.subplots(figsize=(7, 5))
+        im = ax.imshow(matrix, aspect="auto", cmap=cmap)
+        ax.set_xticks(np.arange(len(x_labels)))
+        ax.set_yticks(np.arange(len(y_labels)))
+        ax.set_xticklabels(x_labels, rotation=45, ha="right")
+        ax.set_yticklabels(y_labels)
+        ax.set_xlabel("Action")
+        ax.set_ylabel("Code")
+        ax.set_title(title)
+
+        for i in range(matrix.shape[0]):
+            for j in range(matrix.shape[1]):
+                ax.text(j, i, f"{matrix[i, j]:.0f}", ha="center", va="center", color="white")
+
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label(cbar_label)
+        fig.tight_layout()
+        return fig
+
+    def _plot_bar_chart(
+        self, values: Dict[int, float], title: str, ylabel: str
+    ) -> Optional["matplotlib.figure.Figure"]:
+        if not values:
+            return None
+        try:
+            import matplotlib.pyplot as plt
+        except Exception:
+            return None
+
+        actions = sorted(values.keys())
+        data = [values[a] for a in actions]
+
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.bar(actions, data, color="#4c72b0")
+        ax.set_xlabel("Action")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+        ax.set_xticks(actions)
+        fig.tight_layout()
+        return fig
+
+    def _build_confusion_heatmap(
+        self, codes: np.ndarray, labels: np.ndarray
+    ) -> Tuple[Optional["matplotlib.figure.Figure"], Dict[str, float]]:
+        if codes.size == 0 or labels.size == 0:
+            return None, {
+                "code_label_entropy_mean": float("nan"),
+                "code_label_entropy_min": float("nan"),
+                "code_label_entropy_max": float("nan"),
+            }
+
+        num_actions = int(labels.max()) + 1 if labels.size else 0
+        confusion = np.zeros((self.config.num_codes, num_actions), dtype=float)
+        per_code_entropies = []
+
+        for code, label in zip(codes.tolist(), labels.tolist()):
+            if code < self.config.num_codes and label < num_actions:
+                confusion[code, label] += 1
+
+        for row in confusion:
+            total = row.sum()
+            if total == 0:
+                per_code_entropies.append(float("nan"))
+                continue
+            probs = row / total
+            mask = probs > 0
+            entropy = -np.sum(probs[mask] * np.log2(probs[mask])) if mask.any() else float("nan")
+            per_code_entropies.append(float(entropy))
+
+        entropy_array = np.array([v for v in per_code_entropies if not math.isnan(v)])
+        stats = {
+            "code_label_entropy_mean": float(entropy_array.mean()) if entropy_array.size else float("nan"),
+            "code_label_entropy_min": float(entropy_array.min()) if entropy_array.size else float("nan"),
+            "code_label_entropy_max": float(entropy_array.max()) if entropy_array.size else float("nan"),
+        }
+
+        x_labels = [str(i) for i in range(num_actions)]
+        y_labels = [str(i) for i in range(self.config.num_codes)]
+        fig = self._plot_heatmap(
+            confusion, x_labels, y_labels, "Code-Action Confusion", "Count"
+        )
+        return fig, stats
 
     def compute(self) -> Tuple[Dict[str, float], Dict[str, List[Dict[str, float]]], Dict[str, object]]:
         metrics: Dict[str, float] = {}
@@ -436,15 +505,17 @@ class LatentMetricsAggregator:
             }
         )
 
-        overall_error, per_action_rows = self._compute_per_action_errors()
+        overall_error, per_action_error = self._compute_per_action_errors()
         metrics["next_state_error"] = overall_error
-        if per_action_rows:
-            tables["per_action_next_state_error"] = per_action_rows
+        error_fig = self._plot_bar_chart(
+            per_action_error, "Per-Action Next-State Error", "Mean Error"
+        )
+        if error_fig is not None:
+            figures["next_state_error_per_action"] = error_fig
 
-        tables["code_action_confusion"] = self._build_confusion_table(codes, code_labels)
-        label_rows, label_stats = self._build_label_distribution(codes, code_labels)
-        if label_rows:
-            tables["per_code_label_distribution"] = label_rows
+        confusion_fig, label_stats = self._build_confusion_heatmap(codes, code_labels)
+        if confusion_fig is not None:
+            figures["code_action_confusion"] = confusion_fig
         metrics.update(label_stats)
         metrics.update(self._compute_usage_overlap(codes, code_labels))
 
