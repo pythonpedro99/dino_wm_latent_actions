@@ -74,8 +74,8 @@ model:
   # Split each latent action into 5 codebook segments of size 8 (5 * 8 = 40)
   # while using a single shared embedding table.
   codebook_splits: 5
-  codebook_dim: 8
-  latent_action_dim: 40
+  codebook_dim: 4
+  latent_action_dim: 20
   commitment: 0.25
   ema_decay: 0.99
 
