@@ -142,6 +142,21 @@ class LatentMetricsAggregator:
         self.rng = np.random.default_rng(config.seed)
         self.action_lookup: Dict[Tuple[float, ...], int] = {}
         self.reset()
+        self.centroids = np.array([
+            [ 10.012674  ,  10.605386  ],
+            [-47.39698   ,  -9.770397  ],
+            [-20.167576  ,   0.45612565],
+            [ 20.962193  , -17.880518  ],
+            [  6.682827  ,  42.526566  ],
+            [ -6.6809154 , -37.056248  ],
+            [ 50.51583   ,  10.196131  ],
+            [-15.197311  ,  23.22058   ],
+            [ -1.4817983 ,  -6.2199874 ],
+        ], dtype=np.float32)
+
+        # Apply same scaling as dataset
+        self.centroids /= 100.0
+
 
     def reset(self) -> None:
         self.latent_actions: List[np.ndarray] = []
@@ -156,14 +171,28 @@ class LatentMetricsAggregator:
         self.pred_error_labels: List[np.ndarray] = []
 
     def _actions_to_labels(self, actions: np.ndarray) -> np.ndarray:
-        rounded = np.round(actions, self.config.action_round_decimals)
-        labels = np.empty(rounded.shape[0], dtype=np.int64)
-        for i, row in enumerate(rounded):
-            key = tuple(row.tolist())
-            if key not in self.action_lookup:
-                self.action_lookup[key] = len(self.action_lookup)
-            labels[i] = self.action_lookup[key]
+        """
+        Convert stacked 2-D centroid actions into their centroid indices.
+        Works with arbitrary frameskip (inferred from shape).
+        Input:
+            actions: (N, frameskip*2)
+        Output:
+            labels: (N, frameskip) with integer centroid IDs in {0..8}
+        """
+        base_action_dim = 2
+        frameskip = actions.shape[1] // base_action_dim
+        actions = actions.reshape(-1, frameskip, base_action_dim)
+        N = actions.shape[0]
+        labels = np.zeros((N, frameskip), dtype=np.int64)
+        for i in range(frameskip):
+            sub = actions[:, i, :]                         # (N,2)
+            diff = sub[:, None, :] - self.centroids[None, :, :]  # (N,9,2)
+            dist = np.sum(diff * diff, axis=2)                    # (N,9)
+            labels[:, i] = np.argmin(dist, axis=1)                # best centroid
         return labels
+
+
+
 
     def update(
         self,
@@ -227,17 +256,16 @@ class LatentMetricsAggregator:
                 .cpu()
                 .numpy()
             )
-            codes = code_indices[:, :valid_steps]
-            labels = self._actions_to_labels(act_curr)
+            codes = code_indices[:, :valid_steps]                 # (B, valid_steps, frameskip)
+            labels = self._actions_to_labels(act_curr)            # (M, frameskip)
+            labels = labels.reshape(-1)                           # (M * frameskip,)
 
-            if codes.ndim == 3:
-                # Multiple codebook splits per high-level action; treat each as a
-                # low-level step aligned with the same action label.
-                codes_flat = codes.reshape(-1).cpu().numpy()
-                code_labels = np.repeat(labels, codes.shape[-1])
-            else:
-                codes_flat = codes.reshape(-1).cpu().numpy()
-                code_labels = labels
+            # Flatten codes directly; frameskip == num_splits
+            codes_flat = codes.reshape(-1).cpu().numpy()          # (M * frameskip,)
+
+            # Labels already match codes; no repetition needed
+            code_labels = labels
+
 
             self.latent_actions.append(z_a)
             self.quantized_actions.append(z_q)
@@ -271,44 +299,64 @@ class LatentMetricsAggregator:
         total = hist.sum()
         probs = hist / max(total, 1)
         mask = probs > 0
-        entropy = -np.sum(probs[mask] * np.log2(probs[mask])) if mask.any() else 0.0
-        perplexity = math.exp(-np.sum(probs[mask] * np.log(probs[mask]))) if mask.any() else 0.0
-        dead = float(np.sum(hist == 0) / self.config.num_codes)
+        entropy_bits = -np.sum(probs[mask] * np.log2(probs[mask])) if mask.any() else 0.0
+        perplexity = 2 ** entropy_bits
+        dead_fraction = float(np.sum(hist == 0) / self.config.num_codes)
         return {
             "code_perplexity": float(perplexity),
-            "dead_code_fraction": dead,
-            "bits_per_action": float(entropy),
+            "dead_code_fraction": dead_fraction,
+            "bits_per_action": float(entropy_bits),
         }
 
-    def _compute_usage_overlap(self, codes: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
+
+    def _compute_action_action_overlap(self, codes: np.ndarray, labels: np.ndarray):
+        """
+        Computes an action-action Jaccard similarity heatmap.
+        Returns only the matplotlib Figure for logging (e.g., to W&B).
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except Exception:
+            return None
+
+        # Collect codes used per action
         per_action_codes = defaultdict(set)
         for code, label in zip(codes.tolist(), labels.tolist()):
-            per_action_codes[label].add(code)
+            per_action_codes[int(label)].add(int(code))
 
-        overlaps = []
-        actions = list(per_action_codes.keys())
-        for i in range(len(actions)):
-            for j in range(i + 1, len(actions)):
-                a_codes = per_action_codes[actions[i]]
-                b_codes = per_action_codes[actions[j]]
-                union = len(a_codes | b_codes)
-                inter = len(a_codes & b_codes)
-                if union == 0:
-                    continue
-                overlaps.append(inter / union)
+        # Sort action identifiers for consistent ordering
+        actions = sorted(per_action_codes.keys())
+        A = len(actions)
 
-        if not overlaps:
-            return {
-                "per_action_overlap_mean": float("nan"),
-                "per_action_overlap_min": float("nan"),
-                "per_action_overlap_max": float("nan"),
-            }
-        overlaps = np.array(overlaps)
-        return {
-            "per_action_overlap_mean": float(overlaps.mean()),
-            "per_action_overlap_min": float(overlaps.min()),
-            "per_action_overlap_max": float(overlaps.max()),
-        }
+        # Build the action–action Jaccard similarity matrix
+        overlap_matrix = np.zeros((A, A), dtype=float)
+        for i, ai in enumerate(actions):
+            Ci = per_action_codes[ai]
+            for j, aj in enumerate(actions):
+                Cj = per_action_codes[aj]
+                union = len(Ci | Cj)
+                inter = len(Ci & Cj)
+                overlap_matrix[i, j] = (inter / union) if union > 0 else 0.0
+
+        # ---- Create heatmap figure ----
+        fig, ax = plt.subplots(figsize=(6, 5))
+        im = ax.imshow(overlap_matrix, cmap="viridis", vmin=0, vmax=1)
+
+        ax.set_xticks(np.arange(A))
+        ax.set_yticks(np.arange(A))
+        ax.set_xticklabels(actions)
+        ax.set_yticklabels(actions)
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+
+        ax.set_xlabel("Action")
+        ax.set_ylabel("Action")
+        ax.set_title("Action–Action Code Usage Overlap (Jaccard Similarity)")
+
+        fig.colorbar(im, ax=ax, label="Similarity")
+        fig.tight_layout()
+
+        return fig
+
 
     def _compute_umap(self, features: np.ndarray, labels: np.ndarray, prefix: str) -> Optional["matplotlib.figure.Figure"]:
         if features.shape[0] == 0:
