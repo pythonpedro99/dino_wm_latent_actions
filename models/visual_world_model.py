@@ -18,6 +18,8 @@ class VWorldModel(nn.Module):
         latent_vq_model,
         latent_action_down,
         latent_action_up,
+        ema_decay=0.99,
+        commitment=0.25,
         codebook_splits=None,
         codebook_dim=None,
         proprio_dim=384,
