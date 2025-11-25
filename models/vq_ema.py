@@ -1,7 +1,7 @@
-
 import torch
 import torch.nn as nn
 from torch import Tensor
+
 
 class VectorQuantizerEMA(nn.Module):
     """
@@ -25,9 +25,17 @@ class VectorQuantizerEMA(nn.Module):
     dimension error.
     """
 
-    def __init__(self, num_codes, code_dim, ema_decay=0.99, commitment=0.25):
+    def __init__(
+        self,
+        num_codes,
+        code_dim,
+        codebook_splits=1,
+        ema_decay=0.99,
+        commitment=0.25,
+    ):
         super().__init__()
         self.code_dim = code_dim
+        self.codebook_splits = codebook_splits
         self.num_codes = num_codes
         self.ema_decay = ema_decay
         self.commitment = commitment
@@ -36,8 +44,19 @@ class VectorQuantizerEMA(nn.Module):
         self.register_buffer("cluster_size", torch.zeros(num_codes))
         self.register_buffer("embedding_avg", self.embedding.data.clone())
 
-    def forward(self, z):
-        # z: (B,T,1,code_dim)
+    def forward(self, z: Tensor):
+        # z: (B, T, 1, codebook_splits * code_dim)
+        orig_shape = z.shape
+        assert (
+            orig_shape[-1] % self.code_dim == 0
+        ), "Last dim must be divisible by code_dim"
+        inferred_splits = orig_shape[-1] // self.code_dim
+        if inferred_splits != self.codebook_splits:
+            raise ValueError(
+                f"Expected {self.codebook_splits} codebook splits, got {inferred_splits}"
+            )
+
+        z = z.view(*orig_shape[:-1], self.codebook_splits, self.code_dim)
         flat = z.reshape(-1, self.code_dim)
 
         # distances
@@ -78,4 +97,9 @@ class VectorQuantizerEMA(nn.Module):
         # Straight-through estimator
         z_q_st = z + (z_q - z).detach()
 
-        return {"z_q_st": z_q_st, "loss": loss, "indices": indices}
+        # Restore original latent shape and indices without the codebook axis
+        z_q_flat = z_q_st.view(*orig_shape)
+        index_shape = (*orig_shape[:-1], self.codebook_splits)
+        indices = indices.view(*index_shape)
+
+        return {"z_q_st": z_q_flat, "loss": loss, "indices": indices}

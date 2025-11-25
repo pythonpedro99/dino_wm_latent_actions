@@ -399,7 +399,11 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
         result["decoder"] = None
 
     encoder_emb_dim = result["encoder"].emb_dim
-    latent_dim = train_cfg.model.latent_action_dim
+    latent_dim = (
+        train_cfg.model.codebook_splits * train_cfg.model.codebook_dim
+        if hasattr(train_cfg.model, "codebook_splits")
+        else train_cfg.model.latent_action_dim
+    )
     if "latent_action_model" not in result:
         result["latent_action_model"] = hydra.utils.instantiate(
             train_cfg.latent_action_model,

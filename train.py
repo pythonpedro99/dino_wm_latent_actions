@@ -348,7 +348,11 @@ class Trainer:
                 self.cfg.latent_vq_model,
             )
 
-        latent_dim = self.cfg.model.latent_action_dim
+        latent_dim = (
+            self.cfg.model.codebook_splits * self.cfg.model.codebook_dim
+            if hasattr(self.cfg.model, "codebook_splits")
+            else self.cfg.model.latent_action_dim
+        )
         if self.latent_action_down is None:
             self.latent_action_down = nn.Linear(self.encoder.emb_dim, latent_dim)
         if self.latent_action_up is None:
@@ -907,9 +911,7 @@ class Trainer:
                 "quantized_actions": self.accelerator.gather_for_metrics(quantized_actions),
                 "actions": self.accelerator.gather_for_metrics(actions),
                 "state_repr": self.accelerator.gather_for_metrics(state_repr),
-                "vq_indices": self.accelerator.gather_for_metrics(
-                    vq_indices.view(latent_actions.shape[0], -1)
-                ),
+                "vq_indices": self.accelerator.gather_for_metrics(vq_indices),
                 "per_step_errors": self.accelerator.gather_for_metrics(per_step_errors)
                 if per_step_errors is not None
                 else None,

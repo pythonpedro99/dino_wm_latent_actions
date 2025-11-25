@@ -151,6 +151,7 @@ class LatentMetricsAggregator:
         self.state_next: List[np.ndarray] = []
         self.labels: List[np.ndarray] = []
         self.code_indices: List[np.ndarray] = []
+        self.code_labels: List[np.ndarray] = []
         self.pred_errors: List[np.ndarray] = []
         self.pred_error_labels: List[np.ndarray] = []
 
@@ -226,8 +227,17 @@ class LatentMetricsAggregator:
                 .cpu()
                 .numpy()
             )
-            codes = code_indices[:, :valid_steps].reshape(-1).cpu().numpy()
+            codes = code_indices[:, :valid_steps]
             labels = self._actions_to_labels(act_curr)
+
+            if codes.ndim == 3:
+                # Multiple codebook splits per high-level action; treat each as a
+                # low-level step aligned with the same action label.
+                codes_flat = codes.reshape(-1).cpu().numpy()
+                code_labels = np.repeat(labels, codes.shape[-1])
+            else:
+                codes_flat = codes.reshape(-1).cpu().numpy()
+                code_labels = labels
 
             self.latent_actions.append(z_a)
             self.quantized_actions.append(z_q)
@@ -235,7 +245,8 @@ class LatentMetricsAggregator:
             self.state_curr.append(state_t)
             self.state_next.append(state_tp1)
             self.labels.append(labels)
-            self.code_indices.append(codes)
+            self.code_indices.append(codes_flat)
+            self.code_labels.append(code_labels)
 
             if per_step_errors is not None and per_step_error_actions is not None:
                 error_steps = min(valid_steps, per_step_errors.shape[1], per_step_error_actions.shape[1])
@@ -386,6 +397,7 @@ class LatentMetricsAggregator:
         state_tp1 = self._stack(self.state_next)
         labels = self._stack(self.labels)
         codes = self._stack(self.code_indices).astype(int)
+        code_labels = self._stack(self.code_labels) if self.code_labels else np.empty((0,))
 
         metrics.update(self._compute_code_usage(codes))
 
@@ -429,12 +441,12 @@ class LatentMetricsAggregator:
         if per_action_rows:
             tables["per_action_next_state_error"] = per_action_rows
 
-        tables["code_action_confusion"] = self._build_confusion_table(codes, labels)
-        label_rows, label_stats = self._build_label_distribution(codes, labels)
+        tables["code_action_confusion"] = self._build_confusion_table(codes, code_labels)
+        label_rows, label_stats = self._build_label_distribution(codes, code_labels)
         if label_rows:
             tables["per_code_label_distribution"] = label_rows
         metrics.update(label_stats)
-        metrics.update(self._compute_usage_overlap(codes, labels))
+        metrics.update(self._compute_usage_overlap(codes, code_labels))
 
         umap_a = self._compute_umap(z_a, labels, prefix="z_a")
         umap_q = self._compute_umap(z_q, labels, prefix="z_q")

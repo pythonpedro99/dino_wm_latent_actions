@@ -119,6 +119,7 @@ class VWorldModel(nn.Module):
 
         vq_outputs = self.latent_vq_model(latent_actions)
         quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)
+        vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)
 
         proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))
 
