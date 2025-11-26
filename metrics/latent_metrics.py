@@ -17,7 +17,7 @@ class DecoderTrainConfig:
     num_epochs: int = 10          # "a couple of epochs" – feel free to set this lower/higher
     lr: float = 1e-3
     weight_decay: float = 0.0
-    val_split: float = 0.1        # fraction of data used for validation
+    val_split: float = 0.0        # fraction of data used for validation
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     shuffle: bool = True
 
@@ -409,6 +409,7 @@ class LatentMetricsAggregator:
         self.z_a_split_decoder: Optional[LatentToActionDecoder] = None
         # full training histories per decoder
         self.decoder_histories: Dict[str, Dict[str, List[float]]] = {}
+        self.num_splits = config.num_splits
 
         self.action_lookup: Dict[Tuple[float, ...], int] = {}
         self.reset()
@@ -542,25 +543,24 @@ class LatentMetricsAggregator:
         self.state_next: List[np.ndarray] = []
         self.labels: List[np.ndarray] = []
         self.code_indices: List[np.ndarray] = []
-        self.code_labels: List[np.ndarray] = []
         self.pred_errors: List[np.ndarray] = []
         self.pred_error_labels: List[np.ndarray] = []
 
     def _actions_to_labels(self, actions: np.ndarray) -> np.ndarray:
         """
         Convert stacked 2-D centroid actions into their centroid indices.
-        Works with arbitrary frameskip (inferred from shape).
+        Works with arbitrary self.num_splits (inferred from shape).
         Input:
-            actions: (N, frameskip*2)
+            actions: (N, self.num_splits*2)
         Output:
-            labels: (N, frameskip) with integer centroid IDs in {0..8}
+            labels: (N, self.num_splits) with integer centroid IDs in {0..8}
         """
         base_action_dim = 2
-        frameskip = actions.shape[1] // base_action_dim
-        actions = actions.reshape(-1, frameskip, base_action_dim)
+        self.num_splits = actions.shape[1] // base_action_dim
+        actions = actions.reshape(-1, self.num_splits, base_action_dim)
         N = actions.shape[0]
-        labels = np.zeros((N, frameskip), dtype=np.int64)
-        for i in range(frameskip):
+        labels = np.zeros((N, self.num_splits), dtype=np.int64)
+        for i in range(self.num_splits):
             sub = actions[:, i, :]                         # (N,2)
             diff = sub[:, None, :] - self.centroids[None, :, :]  # (N,9,2)
             dist = np.sum(diff * diff, axis=2)                    # (N,9)
@@ -588,7 +588,6 @@ class LatentMetricsAggregator:
                 == quantized_actions.shape[0]
                 == actions.shape[0]
                 == state_repr.shape[0]
-                == code_indices.shape[0]
             ), "All inputs must share the same batch dimension"
 
             if latent_actions.ndim == 4:
@@ -643,19 +642,10 @@ class LatentMetricsAggregator:
                 .cpu()
                 .numpy()
             )
-            codes = code_indices[:, :valid_steps]                 # (B, valid_steps, frameskip)
-            labels = self._actions_to_labels(act_curr)            # (M, frameskip)
-            labels = labels.reshape(-1)                           # (M * frameskip,)
+            codes = code_indices[:, :valid_steps]                 # (B, valid_steps, self.num_splits)
+            labels = self._actions_to_labels(act_curr).reshape(-1)            # (M, self.num_splits)
+            codes_flat = codes.reshape(-1).cpu().numpy()          # (M * self.num_splits,)                           # (M * self.num_splits,)
 
-            frameskip = codes.shape[-1]
-            assert frameskip == self.config.num_splits, "Unexpected number of splits in codes"
-            assert act_curr.shape[1] % frameskip == 0, "Action dimension not divisible by num_splits"
-            assert latent_actions.shape[-1] % frameskip == 0, "Latent dim not divisible by num_splits"
-            assert quantized_actions.shape[-1] % frameskip == 0, "Quantized latent dim not divisible by num_splits"
-            assert codes.shape[0] * codes.shape[1] * frameskip == labels.shape[0], "Codes and labels must align"
-
-            # Flatten codes directly; frameskip == num_splits
-            codes_flat = codes.reshape(-1).cpu().numpy()          # (M * frameskip,)
 
             self.latent_actions.append(z_a)
             self.quantized_actions.append(z_q)
@@ -664,7 +654,6 @@ class LatentMetricsAggregator:
             self.state_next.append(state_tp1)
             self.labels.append(labels)
             self.code_indices.append(codes_flat)
-            self.code_labels.append(labels)
 
             if per_step_errors is not None and per_step_error_actions is not None:
                 error_steps = min(valid_steps, per_step_errors.shape[1], per_step_error_actions.shape[1])
@@ -930,12 +919,6 @@ class LatentMetricsAggregator:
         codes = self._stack(self.code_indices).astype(int)
         code_labels = self._stack(self.code_labels) if self.code_labels else np.empty((0,))
 
-        assert z_a.shape[0] == z_q.shape[0] == actions.shape[0]
-        assert state_t.shape[0] == state_tp1.shape[0] == z_a.shape[0]
-        assert (
-            labels.shape[0] == z_a.shape[0] * self.config.num_splits
-        ), "Label count must equal number of samples times num_splits"
-        assert codes.shape[0] == labels.shape[0], "Codes and labels must have matching length"
 
         metrics.update(self._compute_code_usage(codes))
 
