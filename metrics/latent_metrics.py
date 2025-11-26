@@ -534,6 +534,102 @@ class LatentMetricsAggregator:
 
             return metrics
 
+    def _predict_actions_from_z_q_split(self, z_q: np.ndarray) -> np.ndarray:
+        """Run the trained z_q split decoder to predict primitive actions."""
+
+        if self.z_q_split_decoder is None or z_q.size == 0:
+            return np.empty((0,))
+
+        device = next(self.z_q_split_decoder.parameters()).device
+        z_q_t = torch.from_numpy(z_q).float().to(device)
+        z_q_split = z_q_t.reshape(
+            -1, self.config.num_splits, z_q_t.shape[1] // self.config.num_splits
+        ).reshape(-1, z_q_t.shape[1] // self.config.num_splits)
+
+        self.z_q_split_decoder.eval()
+        with torch.no_grad():
+            pred_split = self.z_q_split_decoder(z_q_split).cpu().numpy()
+
+        return pred_split.reshape(-1, self.config.num_splits, pred_split.shape[1]).reshape(
+            -1, pred_split.shape[1] * self.config.num_splits
+        )
+
+    def _compute_confusion_matrix(
+        self, true_labels: np.ndarray, pred_labels: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        num_classes = int(
+            max(
+                self.centroids.shape[0],
+                (true_labels.max() + 1) if true_labels.size else 0,
+                (pred_labels.max() + 1) if pred_labels.size else 0,
+            )
+        )
+        confusion = np.zeros((num_classes, num_classes), dtype=int)
+        for t, p in zip(true_labels.tolist(), pred_labels.tolist()):
+            confusion[int(t), int(p)] += 1
+
+        row_sums = confusion.sum(axis=1, keepdims=True)
+        normalized = np.divide(
+            confusion,
+            row_sums,
+            out=np.zeros_like(confusion, dtype=float),
+            where=row_sums > 0,
+        )
+        return confusion, normalized
+
+    def _compute_macro_f1(self, confusion: np.ndarray) -> float:
+        tp = np.diag(confusion).astype(float)
+        fp = confusion.sum(axis=0) - tp
+        fn = confusion.sum(axis=1) - tp
+
+        precision = np.divide(tp, tp + fp, out=np.zeros_like(tp), where=(tp + fp) > 0)
+        recall = np.divide(tp, tp + fn, out=np.zeros_like(tp), where=(tp + fn) > 0)
+        f1 = np.divide(
+            2 * precision * recall,
+            precision + recall,
+            out=np.zeros_like(tp),
+            where=(precision + recall) > 0,
+        )
+        return float(np.mean(f1))
+
+    def _compute_per_action_accuracy(self, confusion: np.ndarray) -> Tuple[np.ndarray, float]:
+        total = confusion.sum()
+        if total == 0:
+            return np.zeros(confusion.shape[0], dtype=float), float("nan")
+
+        tp = np.diag(confusion).astype(float)
+        fp = confusion.sum(axis=0) - tp
+        fn = confusion.sum(axis=1) - tp
+        tn = total - (tp + fp + fn)
+
+        per_class = (tp + tn) / total
+        return per_class, float(np.mean(per_class))
+
+    def _compute_split_decoder_classification_metrics(
+        self, z_q: np.ndarray, actions: np.ndarray
+    ) -> Dict[str, object]:
+        if z_q.size == 0 or actions.size == 0:
+            return {}
+
+        pred_actions = self._predict_actions_from_z_q_split(z_q)
+        if pred_actions.size == 0:
+            return {}
+
+        true_labels = self._actions_to_labels(actions).reshape(-1)
+        pred_labels = self._actions_to_labels(pred_actions).reshape(-1)
+
+        confusion, normalized = self._compute_confusion_matrix(true_labels, pred_labels)
+        macro_f1 = self._compute_macro_f1(confusion)
+        per_action_acc, macro_acc = self._compute_per_action_accuracy(confusion)
+
+        return {
+            "z_q_split_confusion_matrix": confusion.tolist(),
+            "z_q_split_confusion_matrix_normalized": normalized.tolist(),
+            "z_q_split_macro_f1": macro_f1,
+            "z_q_split_per_action_accuracy": per_action_acc.tolist(),
+            "z_q_split_macro_accuracy": macro_acc,
+        }
+
 
     def reset(self) -> None:
         self.latent_actions: List[np.ndarray] = []
@@ -982,5 +1078,7 @@ class LatentMetricsAggregator:
         # --- Train latent->action decoders on accumulated data ---
         decoder_metrics = self._train_action_decoders(z_a, z_q, actions)
         metrics.update(decoder_metrics)
-        
+
+        metrics.update(self._compute_split_decoder_classification_metrics(z_q, actions))
+
         return metrics, tables, figures
