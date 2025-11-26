@@ -1,14 +1,11 @@
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
-from sklearn.preprocessing import StandardScaler
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 import torch
-
-import torch
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Any
+from sklearn.preprocessing import StandardScaler
 
 
 @dataclass
@@ -200,6 +197,30 @@ def train_latent_decoders_from_aggregator(
     models["z_q"] = model_q
     histories["z_q"] = hist_q
 
+    # z_q split -> action split (per-code decoder)
+    num_splits = agg.config.num_splits
+    if z_q.shape[1] % num_splits != 0:
+        raise ValueError("z_q dimension must be divisible by num_splits for split decoder")
+    if z_a.shape[1] % num_splits != 0:
+        raise ValueError("z_a dimension must be divisible by num_splits for split decoder")
+    if actions.shape[1] % num_splits != 0:
+        raise ValueError("Action dimension must be divisible by num_splits for split decoder")
+
+    z_q_chunk_dim = z_q.shape[1] // num_splits
+    z_a_chunk_dim = z_a.shape[1] // num_splits
+    act_chunk_dim = actions.shape[1] // num_splits
+
+    z_q_split = z_q.reshape(-1, num_splits, z_q_chunk_dim).reshape(-1, z_q_chunk_dim)
+    z_a_split = z_a.reshape(-1, num_splits, z_a_chunk_dim).reshape(-1, z_a_chunk_dim)
+    act_split = actions.reshape(-1, num_splits, act_chunk_dim).reshape(-1, act_chunk_dim)
+
+    model_q_split, hist_q_split = _train_single_decoder(z_q_split, act_split, cfg)
+    model_a_split, hist_a_split = _train_single_decoder(z_a_split, act_split, cfg)
+    models["z_q_split"] = model_q_split
+    models["z_a_split"] = model_a_split
+    histories["z_q_split"] = hist_q_split
+    histories["z_a_split"] = hist_a_split
+
     return models, histories
 
 def _pairwise_chebyshev(x: np.ndarray) -> np.ndarray:
@@ -368,6 +389,7 @@ class LatentMetricsConfig:
     umap_neighbors: int = 15
     umap_min_dist: float = 0.1
     seed: int = 0
+    num_splits: int = 5
 
 
 class LatentMetricsAggregator:
@@ -383,6 +405,8 @@ class LatentMetricsAggregator:
         self.decoder_cfg = decoder_cfg or DecoderTrainConfig()
         self.z_a_decoder: Optional[LatentToActionDecoder] = None
         self.z_q_decoder: Optional[LatentToActionDecoder] = None
+        self.z_q_split_decoder: Optional[LatentToActionDecoder] = None
+        self.z_a_split_decoder: Optional[LatentToActionDecoder] = None
         # full training histories per decoder
         self.decoder_histories: Dict[str, Dict[str, List[float]]] = {}
 
@@ -404,11 +428,11 @@ class LatentMetricsAggregator:
         self.centroids /= 100.0
 
     def _train_action_decoders(
-            self,
-            z_a: np.ndarray,
-            z_q: np.ndarray,
-            actions: np.ndarray,
-        ) -> Dict[str, float]:
+        self,
+        z_a: np.ndarray,
+        z_q: np.ndarray,
+        actions: np.ndarray,
+    ) -> Dict[str, float]:
             """
             Train latent->action MLP decoders on all accumulated samples.
 
@@ -440,6 +464,30 @@ class LatentMetricsAggregator:
                     input_dim=z_q_t.shape[1],
                     action_dim=act_t.shape[1],
                 )
+            if self.z_q_split_decoder is None:
+                assert (
+                    z_q_t.shape[1] % self.config.num_splits == 0
+                ), "z_q dimensionality must be divisible by num_splits"
+                assert (
+                    act_t.shape[1] % self.config.num_splits == 0
+                ), "Action dimensionality must be divisible by num_splits"
+
+                self.z_q_split_decoder = LatentToActionDecoder(
+                    input_dim=z_q_t.shape[1] // self.config.num_splits,
+                    action_dim=act_t.shape[1] // self.config.num_splits,
+                )
+            if self.z_a_split_decoder is None:
+                assert (
+                    z_a_t.shape[1] % self.config.num_splits == 0
+                ), "z_a dimensionality must be divisible by num_splits"
+                assert (
+                    act_t.shape[1] % self.config.num_splits == 0
+                ), "Action dimensionality must be divisible by num_splits"
+
+                self.z_a_split_decoder = LatentToActionDecoder(
+                    input_dim=z_a_t.shape[1] // self.config.num_splits,
+                    action_dim=act_t.shape[1] // self.config.num_splits,
+                )
 
             # Train / continue training
             self.z_a_decoder, hist_a = _train_single_decoder(
@@ -449,9 +497,28 @@ class LatentMetricsAggregator:
                 z_q_t, act_t, self.decoder_cfg, model=self.z_q_decoder
             )
 
+            z_q_split = z_q_t.reshape(
+                -1, self.config.num_splits, z_q_t.shape[1] // self.config.num_splits
+            ).reshape(-1, z_q_t.shape[1] // self.config.num_splits)
+            z_a_split = z_a_t.reshape(
+                -1, self.config.num_splits, z_a_t.shape[1] // self.config.num_splits
+            ).reshape(-1, z_a_t.shape[1] // self.config.num_splits)
+            act_split = act_t.reshape(
+                -1, self.config.num_splits, act_t.shape[1] // self.config.num_splits
+            ).reshape(-1, act_t.shape[1] // self.config.num_splits)
+
+            self.z_q_split_decoder, hist_q_split = _train_single_decoder(
+                z_q_split, act_split, self.decoder_cfg, model=self.z_q_split_decoder
+            )
+            self.z_a_split_decoder, hist_a_split = _train_single_decoder(
+                z_a_split, act_split, self.decoder_cfg, model=self.z_a_split_decoder
+            )
+
             self.decoder_histories = {
                 "z_a": hist_a,
                 "z_q": hist_q,
+                "z_q_split": hist_q_split,
+                "z_a_split": hist_a_split,
             }
 
             # Use last-epoch MSE as basic scalar metrics for now
@@ -459,6 +526,10 @@ class LatentMetricsAggregator:
             metrics["z_a_decoder_val_mse"] = hist_a["val_loss"][-1]
             metrics["z_q_decoder_train_mse"] = hist_q["train_loss"][-1]
             metrics["z_q_decoder_val_mse"] = hist_q["val_loss"][-1]
+            metrics["z_q_split_decoder_train_mse"] = hist_q_split["train_loss"][-1]
+            metrics["z_q_split_decoder_val_mse"] = hist_q_split["val_loss"][-1]
+            metrics["z_a_split_decoder_train_mse"] = hist_a_split["train_loss"][-1]
+            metrics["z_a_split_decoder_val_mse"] = hist_a_split["val_loss"][-1]
 
             return metrics
 
@@ -507,6 +578,19 @@ class LatentMetricsAggregator:
         per_step_error_actions: Optional[torch.Tensor] = None,
     ) -> None:
         with torch.no_grad():
+            assert latent_actions.ndim >= 3, "latent_actions must be [B, T, ...]"
+            assert quantized_actions.ndim >= 3, "quantized_actions must be [B, T, ...]"
+            assert actions.ndim >= 3, "actions must be [B, T, ...]"
+            assert state_repr.ndim >= 3, "state_repr must be [B, T, ...]"
+            assert code_indices.ndim >= 3, "code_indices must be [B, T, num_splits]"
+            assert (
+                latent_actions.shape[0]
+                == quantized_actions.shape[0]
+                == actions.shape[0]
+                == state_repr.shape[0]
+                == code_indices.shape[0]
+            ), "All inputs must share the same batch dimension"
+
             if latent_actions.ndim == 4:
                 latent_actions = latent_actions.squeeze(2)
             if quantized_actions.ndim == 4:
@@ -527,6 +611,7 @@ class LatentMetricsAggregator:
                 return
 
             valid_steps = time_dim - 1
+            assert code_indices.shape[1] >= valid_steps, "code_indices too short for valid steps"
 
             z_a = (
                 latent_actions[:, :valid_steps, :]
@@ -562,12 +647,15 @@ class LatentMetricsAggregator:
             labels = self._actions_to_labels(act_curr)            # (M, frameskip)
             labels = labels.reshape(-1)                           # (M * frameskip,)
 
+            frameskip = codes.shape[-1]
+            assert frameskip == self.config.num_splits, "Unexpected number of splits in codes"
+            assert act_curr.shape[1] % frameskip == 0, "Action dimension not divisible by num_splits"
+            assert latent_actions.shape[-1] % frameskip == 0, "Latent dim not divisible by num_splits"
+            assert quantized_actions.shape[-1] % frameskip == 0, "Quantized latent dim not divisible by num_splits"
+            assert codes.shape[0] * codes.shape[1] * frameskip == labels.shape[0], "Codes and labels must align"
+
             # Flatten codes directly; frameskip == num_splits
             codes_flat = codes.reshape(-1).cpu().numpy()          # (M * frameskip,)
-
-            # Labels already match codes; no repetition needed
-            action_labels = labels
-
 
             self.latent_actions.append(z_a)
             self.quantized_actions.append(z_q)
@@ -576,7 +664,7 @@ class LatentMetricsAggregator:
             self.state_next.append(state_tp1)
             self.labels.append(labels)
             self.code_indices.append(codes_flat)
-            self.action_labels.append(action_labels)
+            self.code_labels.append(labels)
 
             if per_step_errors is not None and per_step_error_actions is not None:
                 error_steps = min(valid_steps, per_step_errors.shape[1], per_step_error_actions.shape[1])
@@ -659,8 +747,38 @@ class LatentMetricsAggregator:
 
         return fig
 
+    def _compute_usage_overlap(self, codes: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
+        if codes.size == 0 or labels.size == 0:
+            return {}
 
-    from sklearn.preprocessing import StandardScaler
+        unique_labels = np.unique(labels.astype(int))
+        per_action_codes = {
+            int(lbl): set(codes[labels == lbl].astype(int).tolist()) for lbl in unique_labels
+        }
+
+        overlaps: List[float] = []
+        action_code_counts: List[int] = []
+
+        for i, li in enumerate(unique_labels):
+            Ci = per_action_codes[int(li)]
+            action_code_counts.append(len(Ci))
+            for lj in unique_labels[i + 1 :]:
+                Cj = per_action_codes[int(lj)]
+                union = len(Ci | Cj)
+                inter = len(Ci & Cj)
+                if union > 0:
+                    overlaps.append(inter / union)
+
+        mean_overlap = float(np.mean(overlaps)) if overlaps else float("nan")
+        mean_codes_per_action = (
+            float(np.mean(action_code_counts)) if action_code_counts else float("nan")
+        )
+
+        return {
+            "code_action_jaccard_mean": mean_overlap,
+            "codes_per_action_mean": mean_codes_per_action,
+        }
+
 
     def _compute_umap_triplet(
     self,
@@ -674,10 +792,12 @@ class LatentMetricsAggregator:
 ]:
 
         assert labels.ndim == 1
-        assert labels.shape[0] % 5 == 0
+        assert (
+            labels.shape[0] % self.config.num_splits == 0
+        ), "Labels length must align with num_splits"
 
-        N_full = labels.shape[0] // 5
-        labels_5 = labels.reshape(N_full, 5)
+        N_full = labels.shape[0] // self.config.num_splits
+        labels_5 = labels.reshape(N_full, self.config.num_splits)
 
         labels_composite = []
         for row in labels_5:
@@ -690,8 +810,8 @@ class LatentMetricsAggregator:
                 labels_composite.append(row[0])
         labels_composite = np.array(labels_composite, dtype=int)
 
-        assert z_a.shape[0] == N_full
-        assert z_q.shape[0] == N_full
+        assert z_a.shape[0] == N_full, "z_a rows must match number of action stacks"
+        assert z_q.shape[0] == N_full, "z_q rows must match number of action stacks"
 
         N = min(N_full, self.config.umap_points)
         if N_full <= N:
@@ -709,8 +829,10 @@ class LatentMetricsAggregator:
         scaler_q = StandardScaler().fit(z_q_s)
         z_q_s = scaler_q.transform(z_q_s)
 
-        chunk_dim = z_q.shape[1] // 5
-        z_q_split = z_q_s.reshape(N, 5, chunk_dim).reshape(N * 5, chunk_dim)
+        chunk_dim = z_q.shape[1] // self.config.num_splits
+        z_q_split = z_q_s.reshape(N, self.config.num_splits, chunk_dim).reshape(
+            N * self.config.num_splits, chunk_dim
+        )
         lbl_split = labels_5[idx].reshape(-1)
 
         try:
@@ -807,6 +929,13 @@ class LatentMetricsAggregator:
         labels = self._stack(self.labels)
         codes = self._stack(self.code_indices).astype(int)
         code_labels = self._stack(self.code_labels) if self.code_labels else np.empty((0,))
+
+        assert z_a.shape[0] == z_q.shape[0] == actions.shape[0]
+        assert state_t.shape[0] == state_tp1.shape[0] == z_a.shape[0]
+        assert (
+            labels.shape[0] == z_a.shape[0] * self.config.num_splits
+        ), "Label count must equal number of samples times num_splits"
+        assert codes.shape[0] == labels.shape[0], "Codes and labels must have matching length"
 
         metrics.update(self._compute_code_usage(codes))
 
