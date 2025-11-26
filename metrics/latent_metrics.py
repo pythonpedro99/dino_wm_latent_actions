@@ -6,6 +6,201 @@ from sklearn.preprocessing import StandardScaler
 import numpy as np
 import torch
 
+import torch
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Any
+
+
+@dataclass
+class DecoderTrainConfig:
+    """
+    Config for training latent -> action decoders.
+    """
+    batch_size: int = 512
+    num_epochs: int = 10          # "a couple of epochs" – feel free to set this lower/higher
+    lr: float = 1e-3
+    weight_decay: float = 0.0
+    val_split: float = 0.1        # fraction of data used for validation
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    shuffle: bool = True
+
+
+class LatentToActionDecoder(torch.nn.Module):
+    """
+    Simple MLP that decodes a latent vector (z_a or z_q)
+    back to the continuous action space.
+    """
+    def __init__(self, input_dim: int, action_dim: int, hidden_dim: int = 256):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(input_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ReLU(),
+            torch.nn.Linear(hidden_dim, action_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+def _train_single_decoder(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    cfg: DecoderTrainConfig,
+    model: Optional[LatentToActionDecoder] = None,
+) -> Tuple[LatentToActionDecoder, Dict[str, List[float]]]:
+    """
+    Train a single latent->action decoder with MSE loss.
+
+    x: (N, D_latent)
+    y: (N, D_action)
+    model:
+        If provided, continue training this model.
+        If None, a fresh LatentToActionDecoder will be created.
+    """
+    from torch.utils.data import DataLoader, TensorDataset
+
+    device = torch.device(cfg.device)
+    x = x.to(device)
+    y = y.to(device)
+
+    N = x.shape[0]
+    if N == 0:
+        raise ValueError("No samples available to train decoder.")
+
+    # --- train/val split ---
+    n_val = int(N * cfg.val_split)
+    if n_val > 0:
+        idx = torch.randperm(N, device=device)
+        val_idx = idx[:n_val]
+        train_idx = idx[n_val:]
+        x_train, y_train = x[train_idx], y[train_idx]
+        x_val, y_val = x[val_idx], y[val_idx]
+    else:
+        x_train, y_train = x, y
+        x_val, y_val = x[:0], y[:0]
+
+    train_ds = TensorDataset(x_train, y_train)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=cfg.batch_size,
+        shuffle=cfg.shuffle,
+        drop_last=False,
+    )
+
+    # --- (re-)initialize model if needed ---
+    if model is None:
+        model = LatentToActionDecoder(
+            input_dim=x.shape[1],
+            action_dim=y.shape[1],
+        )
+    model = model.to(device)
+
+    optim = torch.optim.Adam(
+        model.parameters(),
+        lr=cfg.lr,
+        weight_decay=cfg.weight_decay,
+    )
+    loss_fn = torch.nn.MSELoss()
+
+    history: Dict[str, List[float]] = {
+        "train_loss": [],
+        "val_loss": [],
+    }
+
+    for epoch in range(cfg.num_epochs):
+        model.train()
+        total_loss = 0.0
+        total_batches = 0
+
+        for xb, yb in train_loader:
+            optim.zero_grad()
+            pred = model(xb)
+            loss = loss_fn(pred, yb)
+            loss.backward()
+            optim.step()
+
+            total_loss += loss.item()
+            total_batches += 1
+
+        mean_train_loss = total_loss / max(1, total_batches)
+        history["train_loss"].append(mean_train_loss)
+
+        # --- validation ---
+        if n_val > 0 and x_val.numel() > 0:
+            model.eval()
+            with torch.no_grad():
+                val_pred = model(x_val)
+                val_loss = loss_fn(val_pred, y_val).item()
+        else:
+            val_loss = float("nan")
+        history["val_loss"].append(val_loss)
+
+    return model, history
+
+
+def train_latent_decoders_from_aggregator(
+    agg: "LatentMetricsAggregator",
+    cfg: Optional[DecoderTrainConfig] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Trains two MLP decoders that map z_a and z_q to actions
+    using the data accumulated in a LatentMetricsAggregator.
+
+    Parameters
+    ----------
+    agg : LatentMetricsAggregator
+        Must have been fed with data via agg.update(...).
+    cfg : DecoderTrainConfig, optional
+        Training hyperparameters.
+
+    Returns
+    -------
+    models : dict
+        {
+            "z_a": LatentToActionDecoder,
+            "z_q": LatentToActionDecoder,
+        }
+    histories : dict
+        {
+            "z_a": {"train_loss": [...], "val_loss": [...]},
+            "z_q": {"train_loss": [...], "val_loss": [...]},
+        }
+    """
+    if cfg is None:
+        cfg = DecoderTrainConfig()
+
+    # Extract numpy arrays from the aggregator
+    z_a_np = agg._stack(agg.latent_actions)
+    z_q_np = agg._stack(agg.quantized_actions)
+    act_np = agg._stack(agg.actions)
+
+    if z_a_np.size == 0 or z_q_np.size == 0 or act_np.size == 0:
+        raise ValueError(
+            "LatentMetricsAggregator does not contain any samples. "
+            "Make sure to call agg.update(...) before training decoders."
+        )
+
+    # Convert to tensors
+    z_a = torch.from_numpy(z_a_np).float()
+    z_q = torch.from_numpy(z_q_np).float()
+    actions = torch.from_numpy(act_np).float()
+
+    models: Dict[str, Any] = {}
+    histories: Dict[str, Any] = {}
+
+    # z_a -> action
+    model_a, hist_a = _train_single_decoder(z_a, actions, cfg)
+    models["z_a"] = model_a
+    histories["z_a"] = hist_a
+
+    # z_q -> action
+    model_q, hist_q = _train_single_decoder(z_q, actions, cfg)
+    models["z_q"] = model_q
+    histories["z_q"] = hist_q
+
+    return models, histories
 
 def _pairwise_chebyshev(x: np.ndarray) -> np.ndarray:
     diff = np.abs(x[:, None, :] - x[None, :, :])
@@ -73,48 +268,87 @@ def knn_mutual_information(x: np.ndarray, y: np.ndarray, k: int, rng: np.random.
     return _digamma(k) + _digamma(n) - float(np.mean(_digamma_vector(nx + 1) + _digamma_vector(ny + 1)))
 
 
-def knn_consistency(features: np.ndarray, labels: np.ndarray, k: int, rng: np.random.Generator, max_samples: int) -> float:
+def knn_consistency(
+    features: np.ndarray,
+    labels: np.ndarray,
+    k: int,
+    rng: np.random.Generator,
+    max_samples: int
+) -> float:
+
     if features.shape[0] <= k:
         return float("nan")
+
+    if labels.ndim == 2:
+        composite = []
+        for row in labels:
+            vals, counts = np.unique(row, return_counts=True)
+            maxc = counts.max()
+            majority = vals[counts == maxc]
+            if majority.size == 1:
+                composite.append(majority[0])
+            else:
+                composite.append(row[0])
+        labels = np.array(composite, dtype=int)
+
     features, indices = _sample_with_indices(features, max_samples, rng)
     labels = labels[indices]
+
     if features.shape[0] <= k:
         return float("nan")
+
     dist = _pairwise_l2(features)
     np.fill_diagonal(dist, np.inf)
+
     nn_indices = np.argpartition(dist, kth=k - 1, axis=1)[:, :k]
     neighbor_labels = labels[nn_indices]
+
     matches = (neighbor_labels == labels[:, None]).mean(axis=1)
     return float(np.mean(matches))
 
 
 
+
 def compute_class_variances(features: np.ndarray, labels: np.ndarray) -> Tuple[float, float]:
-    if features.size == 0:
+    if features.size == 0 or labels.size == 0:
         return float("nan"), float("nan")
+
+    if labels.ndim == 2:
+        composite = []
+        for row in labels:
+            vals, counts = np.unique(row, return_counts=True)
+            maxc = counts.max()
+            majority = vals[counts == maxc]
+            if majority.size == 1:
+                composite.append(majority[0])
+            else:
+                composite.append(row[0])
+        labels = np.array(composite, dtype=int)
+
     unique_labels = np.unique(labels)
     class_means = []
-    intra = []
+    intra_vars = []
+
     for label in unique_labels:
         mask = labels == label
         if mask.sum() < 2:
             continue
-        class_feats = features[mask]
-        intra.append(class_feats.var(axis=0, ddof=1).mean())
-        class_means.append(class_feats.mean(axis=0))
+        feats = features[mask]
+        intra_vars.append(feats.var(axis=0, ddof=1).mean())
+        class_means.append(feats.mean(axis=0))
 
     if not class_means:
         return float("nan"), float("nan")
 
     class_means = np.stack(class_means)
-    intra_val = float(np.mean(intra)) if intra else float("nan")
-    inter_dists = _pairwise_l2(class_means)
-    triu = np.triu_indices_from(inter_dists, k=1)
-    if triu[0].size == 0:
-        inter_val = float("nan")
-    else:
-        inter_val = float(np.mean(inter_dists[triu] ** 2))
+    intra_val = float(np.mean(intra_vars)) if intra_vars else float("nan")
+
+    inter = _pairwise_l2(class_means)
+    triu = np.triu_indices_from(inter, k=1)
+    inter_val = float(np.mean(inter[triu] ** 2)) if triu[0].size else float("nan")
+
     return intra_val, inter_val
+
 
 
 def compute_fdr(intra: float, inter: float) -> float:
@@ -137,9 +371,21 @@ class LatentMetricsConfig:
 
 
 class LatentMetricsAggregator:
-    def __init__(self, config: LatentMetricsConfig):
+    def __init__(
+        self,
+        config: LatentMetricsConfig,
+        decoder_cfg: Optional[DecoderTrainConfig] = None,
+    ):
         self.config = config
         self.rng = np.random.default_rng(config.seed)
+
+        # --- decoder / training config ---
+        self.decoder_cfg = decoder_cfg or DecoderTrainConfig()
+        self.z_a_decoder: Optional[LatentToActionDecoder] = None
+        self.z_q_decoder: Optional[LatentToActionDecoder] = None
+        # full training histories per decoder
+        self.decoder_histories: Dict[str, Dict[str, List[float]]] = {}
+
         self.action_lookup: Dict[Tuple[float, ...], int] = {}
         self.reset()
         self.centroids = np.array([
@@ -156,6 +402,65 @@ class LatentMetricsAggregator:
 
         # Apply same scaling as dataset
         self.centroids /= 100.0
+
+    def _train_action_decoders(
+            self,
+            z_a: np.ndarray,
+            z_q: np.ndarray,
+            actions: np.ndarray,
+        ) -> Dict[str, float]:
+            """
+            Train latent->action MLP decoders on all accumulated samples.
+
+            Stores:
+                self.z_a_decoder, self.z_q_decoder
+                self.decoder_histories = { "z_a": history, "z_q": history }
+
+            Returns a dict of scalar metrics (e.g. last-epoch losses) that
+            can be merged into the overall metrics dict in `compute()`.
+            """
+            metrics: Dict[str, float] = {}
+
+            if z_a.size == 0 or z_q.size == 0 or actions.size == 0:
+                return metrics
+
+            # Convert to tensors
+            z_a_t = torch.from_numpy(z_a).float()
+            z_q_t = torch.from_numpy(z_q).float()
+            act_t = torch.from_numpy(actions).float()
+
+            # Lazily create decoders if we don't know dims until now
+            if self.z_a_decoder is None:
+                self.z_a_decoder = LatentToActionDecoder(
+                    input_dim=z_a_t.shape[1],
+                    action_dim=act_t.shape[1],
+                )
+            if self.z_q_decoder is None:
+                self.z_q_decoder = LatentToActionDecoder(
+                    input_dim=z_q_t.shape[1],
+                    action_dim=act_t.shape[1],
+                )
+
+            # Train / continue training
+            self.z_a_decoder, hist_a = _train_single_decoder(
+                z_a_t, act_t, self.decoder_cfg, model=self.z_a_decoder
+            )
+            self.z_q_decoder, hist_q = _train_single_decoder(
+                z_q_t, act_t, self.decoder_cfg, model=self.z_q_decoder
+            )
+
+            self.decoder_histories = {
+                "z_a": hist_a,
+                "z_q": hist_q,
+            }
+
+            # Use last-epoch MSE as basic scalar metrics for now
+            metrics["z_a_decoder_train_mse"] = hist_a["train_loss"][-1]
+            metrics["z_a_decoder_val_mse"] = hist_a["val_loss"][-1]
+            metrics["z_q_decoder_train_mse"] = hist_q["train_loss"][-1]
+            metrics["z_q_decoder_val_mse"] = hist_q["val_loss"][-1]
+
+            return metrics
 
 
     def reset(self) -> None:
@@ -190,9 +495,6 @@ class LatentMetricsAggregator:
             dist = np.sum(diff * diff, axis=2)                    # (N,9)
             labels[:, i] = np.argmin(dist, axis=1)                # best centroid
         return labels
-
-
-
 
     def update(
         self,
@@ -264,7 +566,7 @@ class LatentMetricsAggregator:
             codes_flat = codes.reshape(-1).cpu().numpy()          # (M * frameskip,)
 
             # Labels already match codes; no repetition needed
-            code_labels = labels
+            action_labels = labels
 
 
             self.latent_actions.append(z_a)
@@ -274,7 +576,7 @@ class LatentMetricsAggregator:
             self.state_next.append(state_tp1)
             self.labels.append(labels)
             self.code_indices.append(codes_flat)
-            self.code_labels.append(code_labels)
+            self.action_labels.append(action_labels)
 
             if per_step_errors is not None and per_step_error_actions is not None:
                 error_steps = min(valid_steps, per_step_errors.shape[1], per_step_error_actions.shape[1])
@@ -448,118 +750,46 @@ class LatentMetricsAggregator:
 
         return fig_a, fig_q, fig_qs
 
-
-
-    def _compute_per_action_errors(self) -> Tuple[float, Dict[int, float]]:
-        if not self.pred_errors:
-            return float("nan"), {}
-        errors = self._stack(self.pred_errors)
-        labels = self._stack(self.pred_error_labels)
-        overall = float(np.mean(errors)) if errors.size else float("nan")
-        per_action = {}
-        for label in np.unique(labels):
-            mask = labels == label
-            per_action[int(label)] = float(errors[mask].mean())
-        return overall, per_action
-
-    def _plot_heatmap(
-        self,
-        matrix: np.ndarray,
-        x_labels: List[str],
-        y_labels: List[str],
-        title: str,
-        cbar_label: str,
-        cmap: str = "magma",
+    def _build_confusion_heatmap(
+        self, codes: np.ndarray, labels: np.ndarray
     ) -> Optional["matplotlib.figure.Figure"]:
-        if matrix.size == 0:
+
+        if codes.size == 0 or labels.size == 0:
             return None
+
+        num_actions = int(labels.max()) + 1
+        confusion = np.zeros((self.config.num_codes, num_actions), dtype=float)
+
+        for code, label in zip(codes.tolist(), labels.tolist()):
+            if 0 <= code < self.config.num_codes and 0 <= label < num_actions:
+                confusion[code, label] += 1
+
         try:
             import matplotlib.pyplot as plt
         except Exception:
             return None
 
         fig, ax = plt.subplots(figsize=(7, 5))
-        im = ax.imshow(matrix, aspect="auto", cmap=cmap)
-        ax.set_xticks(np.arange(len(x_labels)))
-        ax.set_yticks(np.arange(len(y_labels)))
-        ax.set_xticklabels(x_labels, rotation=45, ha="right")
-        ax.set_yticklabels(y_labels)
-        ax.set_xlabel("Action")
-        ax.set_ylabel("Code")
-        ax.set_title(title)
 
-        for i in range(matrix.shape[0]):
-            for j in range(matrix.shape[1]):
-                ax.text(j, i, f"{matrix[i, j]:.0f}", ha="center", va="center", color="white")
+        im = ax.imshow(confusion, cmap="magma", aspect="auto")
 
-        cbar = fig.colorbar(im, ax=ax)
-        cbar.set_label(cbar_label)
+        ax.set_xticks(np.arange(num_actions))
+        ax.set_yticks(np.arange(self.config.num_codes))
+
+        ax.set_xticklabels([str(i) for i in range(num_actions)])
+        ax.set_yticklabels([str(i) for i in range(self.config.num_codes)])
+
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+
+        ax.set_xlabel("Primitive Action")
+        ax.set_ylabel("Code Index")
+        ax.set_title("Code–Action Confusion")
+
+        fig.colorbar(im, ax=ax, label="Count")
         fig.tight_layout()
+
         return fig
 
-    def _plot_bar_chart(
-        self, values: Dict[int, float], title: str, ylabel: str
-    ) -> Optional["matplotlib.figure.Figure"]:
-        if not values:
-            return None
-        try:
-            import matplotlib.pyplot as plt
-        except Exception:
-            return None
-
-        actions = sorted(values.keys())
-        data = [values[a] for a in actions]
-
-        fig, ax = plt.subplots(figsize=(7, 4))
-        ax.bar(actions, data, color="#4c72b0")
-        ax.set_xlabel("Action")
-        ax.set_ylabel(ylabel)
-        ax.set_title(title)
-        ax.set_xticks(actions)
-        fig.tight_layout()
-        return fig
-
-    def _build_confusion_heatmap(
-        self, codes: np.ndarray, labels: np.ndarray
-    ) -> Tuple[Optional["matplotlib.figure.Figure"], Dict[str, float]]:
-        if codes.size == 0 or labels.size == 0:
-            return None, {
-                "code_label_entropy_mean": float("nan"),
-                "code_label_entropy_min": float("nan"),
-                "code_label_entropy_max": float("nan"),
-            }
-
-        num_actions = int(labels.max()) + 1 if labels.size else 0
-        confusion = np.zeros((self.config.num_codes, num_actions), dtype=float)
-        per_code_entropies = []
-
-        for code, label in zip(codes.tolist(), labels.tolist()):
-            if code < self.config.num_codes and label < num_actions:
-                confusion[code, label] += 1
-
-        for row in confusion:
-            total = row.sum()
-            if total == 0:
-                per_code_entropies.append(float("nan"))
-                continue
-            probs = row / total
-            mask = probs > 0
-            entropy = -np.sum(probs[mask] * np.log2(probs[mask])) if mask.any() else float("nan")
-            per_code_entropies.append(float(entropy))
-
-        entropy_array = np.array([v for v in per_code_entropies if not math.isnan(v)])
-        stats = {
-            "code_label_entropy_mean": float(entropy_array.mean()) if entropy_array.size else float("nan"),
-            "code_label_entropy_min": float(entropy_array.min()) if entropy_array.size else float("nan"),
-            "code_label_entropy_max": float(entropy_array.max()) if entropy_array.size else float("nan"),
-        }
-
-        x_labels = [str(i) for i in range(num_actions)]
-        y_labels = [str(i) for i in range(self.config.num_codes)]
-        fig = self._plot_heatmap(
-            confusion, x_labels, y_labels, "Code-Action Confusion", "Count"
-        )
-        return fig, stats
 
     def compute(self) -> Tuple[Dict[str, float], Dict[str, List[Dict[str, float]]], Dict[str, object]]:
         metrics: Dict[str, float] = {}
@@ -637,5 +867,8 @@ class LatentMetricsAggregator:
         if fig_qs is not None:
             figures["umap_z_q_split"] = fig_qs
 
-
+        # --- Train latent->action decoders on accumulated data ---
+        decoder_metrics = self._train_action_decoders(z_a, z_q, actions)
+        metrics.update(decoder_metrics)
+        
         return metrics, tables, figures
