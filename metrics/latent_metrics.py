@@ -8,27 +8,30 @@ import torch
 from sklearn.preprocessing import StandardScaler
 
 
-@dataclass
-class DecoderTrainConfig:
-    """
-    Config for training latent -> action decoders.
-    """
-    batch_size: int = 512
-    num_epochs: int = 10          # "a couple of epochs" – feel free to set this lower/higher
-    lr: float = 1e-3
-    weight_decay: float = 0.0
-    val_split: float = 0.0        # fraction of data used for validation
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
-    shuffle: bool = True
-
+import torch
+from dataclasses import dataclass
 
 class LatentToActionDecoder(torch.nn.Module):
     """
     Simple MLP that decodes a latent vector (z_a or z_q)
     back to the continuous action space.
+    Includes its own training configuration.
     """
-    def __init__(self, input_dim: int, action_dim: int, hidden_dim: int = 256):
+    def __init__(
+        self,
+        input_dim: int,
+        action_dim: int,
+        hidden_dim: int = 256,
+        batch_size: int = 512,
+        num_epochs: int = 10,
+        lr: float = 1e-3,
+        weight_decay: float = 0.0,
+        val_split: float = 0.0,
+        device: str = None,
+        shuffle: bool = True,
+    ):
         super().__init__()
+
         self.net = torch.nn.Sequential(
             torch.nn.Linear(input_dim, hidden_dim),
             torch.nn.ReLU(),
@@ -36,6 +39,17 @@ class LatentToActionDecoder(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, action_dim),
         )
+
+        # Training configuration
+        self.batch_size = batch_size
+        self.num_epochs = num_epochs
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.val_split = val_split
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.shuffle = shuffle
+
+        self.to(self.device)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
