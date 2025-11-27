@@ -957,7 +957,7 @@ class LatentMetricsAggregator:
 
     def compute(
         self,
-    ) -> Tuple[Dict[str, float], Dict[str, List[Dict[str, float]]], Dict[str, object]]:
+    ) -> Tuple[Dict[str, float], Dict[str, object]]:
         metrics: Dict[str, float] = {}
         figures: Dict[str, object] = {}
 
