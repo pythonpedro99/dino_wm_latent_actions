@@ -751,22 +751,12 @@ class Trainer:
             self.latent_metric_analyzer is not None
             and self.accelerator.is_main_process
         ):
-            latent_metrics, latent_tables, latent_figs = (
-                self.latent_metric_analyzer.compute()
-            )
+            latent_metrics, latent_figs = self.latent_metric_analyzer.compute()
             for key, value in latent_metrics.items():
                 if math.isnan(value):
                     continue
                 self.logs_update({f"val_{key}": [value]})
             if self.wandb_run is not None:
-                for table_name, rows in latent_tables.items():
-                    if not rows:
-                        continue
-                    columns = list(rows[0].keys())
-                    table = wandb.Table(columns=columns)
-                    for row in rows:
-                        table.add_data(*[row[col] for col in columns])
-                    self.wandb_run.log({f"val_{table_name}": table, "epoch": self.epoch})
                 for fig_name, fig in latent_figs.items():
                     if fig is None:
                         continue
