@@ -120,7 +120,7 @@ def _train_single_decoder(
         "val_loss": [],
     }
 
-    for epoch in range(cfg.num_epochs):
+    for _ in range(cfg.num_epochs):
         model.train()
         total_loss = 0.0
         total_batches = 0
@@ -182,7 +182,7 @@ def train_latent_decoders_from_aggregator(
     if cfg is None:
         cfg = DecoderTrainConfig()
 
-    # Extract numpy arrays from the aggregator
+    # Extract numpy arrays from the aggregator 
     z_a_np = agg._stack(agg.latent_actions)
     z_q_np = agg._stack(agg.quantized_actions)
     act_np = agg._stack(agg.actions)
@@ -341,9 +341,6 @@ def knn_consistency(
     matches = (neighbor_labels == labels[:, None]).mean(axis=1)
     return float(np.mean(matches))
 
-
-
-
 def compute_class_variances(features: np.ndarray, labels: np.ndarray) -> Tuple[float, float]:
     if features.size == 0 or labels.size == 0:
         return float("nan"), float("nan")
@@ -383,8 +380,6 @@ def compute_class_variances(features: np.ndarray, labels: np.ndarray) -> Tuple[f
     inter_val = float(np.mean(inter[triu] ** 2)) if triu[0].size else float("nan")
 
     return intra_val, inter_val
-
-
 
 def compute_fdr(intra: float, inter: float) -> float:
     if math.isnan(intra) or intra == 0:
@@ -753,7 +748,7 @@ class LatentMetricsAggregator:
                 .numpy()
             )
             codes = code_indices[:, :valid_steps]                 # (B, valid_steps, self.num_splits)
-            labels = self._actions_to_labels(act_curr).reshape(-1)            # (M, self.num_splits)
+            labels = self._actions_to_labels(act_curr)           # (M, self.num_splits)
             codes_flat = codes.reshape(-1).cpu().numpy()          # (M * self.num_splits,)                           # (M * self.num_splits,)
 
 
@@ -1027,7 +1022,6 @@ class LatentMetricsAggregator:
         state_tp1 = self._stack(self.state_next)
         labels = self._stack(self.labels)
         codes = self._stack(self.code_indices).astype(int)
-        code_labels = self._stack(self.code_labels) if self.code_labels else np.empty((0,))
 
 
         metrics.update(self._compute_code_usage(codes))
@@ -1067,19 +1061,12 @@ class LatentMetricsAggregator:
             }
         )
 
-        overall_error, per_action_error = self._compute_per_action_errors()
-        metrics["next_state_error"] = overall_error
-        error_fig = self._plot_bar_chart(
-            per_action_error, "Per-Action Next-State Error", "Mean Error"
-        )
-        if error_fig is not None:
-            figures["next_state_error_per_action"] = error_fig
 
-        confusion_fig, label_stats = self._build_confusion_heatmap(codes, code_labels)
+        confusion_fig = self._build_confusion_heatmap(codes, labels)
         if confusion_fig is not None:
             figures["code_action_confusion"] = confusion_fig
         metrics.update(label_stats)
-        metrics.update(self._compute_usage_overlap(codes, code_labels))
+        metrics.update(self._compute_usage_overlap(codes, labels))
 
         fig_a, fig_q, fig_qs = self._compute_umap_triplet(z_a, z_q, labels)
         if fig_a is not None:
