@@ -7,16 +7,13 @@ import numpy as np
 import torch
 from sklearn.preprocessing import StandardScaler
 
-
-import torch
-from dataclasses import dataclass
-
 class LatentToActionDecoder(torch.nn.Module):
     """
-    Simple MLP that decodes a latent vector (z_a or z_q)
-    back to the continuous action space.
-    Includes its own training configuration.
+    Simple MLP that decodes a latent vector (z_a or z_q) back to the
+    continuous action space. The module stores its own training hyperparameters
+    and exposes a ``fit`` method for reuse.
     """
+
     def __init__(
         self,
         input_dim: int,
@@ -27,9 +24,9 @@ class LatentToActionDecoder(torch.nn.Module):
         lr: float = 1e-3,
         weight_decay: float = 0.0,
         val_split: float = 0.0,
-        device: str = None,
+        device: Optional[str] = None,
         shuffle: bool = True,
-    ):
+    ) -> None:
         super().__init__()
 
         self.net = torch.nn.Sequential(
@@ -40,13 +37,12 @@ class LatentToActionDecoder(torch.nn.Module):
             torch.nn.Linear(hidden_dim, action_dim),
         )
 
-        # Training configuration
         self.batch_size = batch_size
         self.num_epochs = num_epochs
         self.lr = lr
         self.weight_decay = weight_decay
         self.val_split = val_split
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         self.shuffle = shuffle
 
         self.to(self.device)
@@ -54,188 +50,83 @@ class LatentToActionDecoder(torch.nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
+    def fit(self, x: torch.Tensor, y: torch.Tensor) -> Dict[str, List[float]]:
+        """
+        Train the decoder using mean squared error loss.
 
-def _train_single_decoder(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    cfg: DecoderTrainConfig,
-    model: Optional[LatentToActionDecoder] = None,
-) -> Tuple[LatentToActionDecoder, Dict[str, List[float]]]:
-    """
-    Train a single latent->action decoder with MSE loss.
+        Args:
+            x: Latent features, shape (N, D_latent).
+            y: Target actions, shape (N, D_action).
 
-    x: (N, D_latent)
-    y: (N, D_action)
-    model:
-        If provided, continue training this model.
-        If None, a fresh LatentToActionDecoder will be created.
-    """
-    from torch.utils.data import DataLoader, TensorDataset
+        Returns:
+            History dict containing train/val loss curves.
+        """
 
-    device = torch.device(cfg.device)
-    x = x.to(device)
-    y = y.to(device)
+        from torch.utils.data import DataLoader, TensorDataset
 
-    N = x.shape[0]
-    if N == 0:
-        raise ValueError("No samples available to train decoder.")
+        x = x.to(self.device)
+        y = y.to(self.device)
 
-    # --- train/val split ---
-    n_val = int(N * cfg.val_split)
-    if n_val > 0:
-        idx = torch.randperm(N, device=device)
-        val_idx = idx[:n_val]
-        train_idx = idx[n_val:]
-        x_train, y_train = x[train_idx], y[train_idx]
-        x_val, y_val = x[val_idx], y[val_idx]
-    else:
-        x_train, y_train = x, y
-        x_val, y_val = x[:0], y[:0]
+        n_samples = x.shape[0]
+        if n_samples == 0:
+            raise ValueError("No samples available to train decoder.")
 
-    train_ds = TensorDataset(x_train, y_train)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=cfg.shuffle,
-        drop_last=False,
-    )
-
-    # --- (re-)initialize model if needed ---
-    if model is None:
-        model = LatentToActionDecoder(
-            input_dim=x.shape[1],
-            action_dim=y.shape[1],
-        )
-    model = model.to(device)
-
-    optim = torch.optim.Adam(
-        model.parameters(),
-        lr=cfg.lr,
-        weight_decay=cfg.weight_decay,
-    )
-    loss_fn = torch.nn.MSELoss()
-
-    history: Dict[str, List[float]] = {
-        "train_loss": [],
-        "val_loss": [],
-    }
-
-    for _ in range(cfg.num_epochs):
-        model.train()
-        total_loss = 0.0
-        total_batches = 0
-
-        for xb, yb in train_loader:
-            optim.zero_grad()
-            pred = model(xb)
-            loss = loss_fn(pred, yb)
-            loss.backward()
-            optim.step()
-
-            total_loss += loss.item()
-            total_batches += 1
-
-        mean_train_loss = total_loss / max(1, total_batches)
-        history["train_loss"].append(mean_train_loss)
-
-        # --- validation ---
-        if n_val > 0 and x_val.numel() > 0:
-            model.eval()
-            with torch.no_grad():
-                val_pred = model(x_val)
-                val_loss = loss_fn(val_pred, y_val).item()
+        n_val = int(n_samples * self.val_split)
+        if n_val > 0:
+            idx = torch.randperm(n_samples, device=self.device)
+            val_idx = idx[:n_val]
+            train_idx = idx[n_val:]
+            x_train, y_train = x[train_idx], y[train_idx]
+            x_val, y_val = x[val_idx], y[val_idx]
         else:
-            val_loss = float("nan")
-        history["val_loss"].append(val_loss)
+            x_train, y_train = x, y
+            x_val, y_val = x[:0], y[:0]
 
-    return model, history
-
-
-def train_latent_decoders_from_aggregator(
-    agg: "LatentMetricsAggregator",
-    cfg: Optional[DecoderTrainConfig] = None,
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Trains two MLP decoders that map z_a and z_q to actions
-    using the data accumulated in a LatentMetricsAggregator.
-
-    Parameters
-    ----------
-    agg : LatentMetricsAggregator
-        Must have been fed with data via agg.update(...).
-    cfg : DecoderTrainConfig, optional
-        Training hyperparameters.
-
-    Returns
-    -------
-    models : dict
-        {
-            "z_a": LatentToActionDecoder,
-            "z_q": LatentToActionDecoder,
-        }
-    histories : dict
-        {
-            "z_a": {"train_loss": [...], "val_loss": [...]},
-            "z_q": {"train_loss": [...], "val_loss": [...]},
-        }
-    """
-    if cfg is None:
-        cfg = DecoderTrainConfig()
-
-    # Extract numpy arrays from the aggregator 
-    z_a_np = agg._stack(agg.latent_actions)
-    z_q_np = agg._stack(agg.quantized_actions)
-    act_np = agg._stack(agg.actions)
-
-    if z_a_np.size == 0 or z_q_np.size == 0 or act_np.size == 0:
-        raise ValueError(
-            "LatentMetricsAggregator does not contain any samples. "
-            "Make sure to call agg.update(...) before training decoders."
+        train_ds = TensorDataset(x_train, y_train)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=self.batch_size,
+            shuffle=self.shuffle,
+            drop_last=False,
         )
 
-    # Convert to tensors
-    z_a = torch.from_numpy(z_a_np).float()
-    z_q = torch.from_numpy(z_q_np).float()
-    actions = torch.from_numpy(act_np).float()
+        optim = torch.optim.Adam(
+            self.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
+        loss_fn = torch.nn.MSELoss()
 
-    models: Dict[str, Any] = {}
-    histories: Dict[str, Any] = {}
+        history: Dict[str, List[float]] = {"train_loss": [], "val_loss": []}
 
-    # z_a -> action
-    model_a, hist_a = _train_single_decoder(z_a, actions, cfg)
-    models["z_a"] = model_a
-    histories["z_a"] = hist_a
+        for _ in range(self.num_epochs):
+            self.train()
+            total_loss = 0.0
+            total_batches = 0
 
-    # z_q -> action
-    model_q, hist_q = _train_single_decoder(z_q, actions, cfg)
-    models["z_q"] = model_q
-    histories["z_q"] = hist_q
+            for xb, yb in train_loader:
+                optim.zero_grad()
+                pred = self(xb)
+                loss = loss_fn(pred, yb)
+                loss.backward()
+                optim.step()
 
-    # z_q split -> action split (per-code decoder)
-    num_splits = agg.config.num_splits
-    if z_q.shape[1] % num_splits != 0:
-        raise ValueError("z_q dimension must be divisible by num_splits for split decoder")
-    if z_a.shape[1] % num_splits != 0:
-        raise ValueError("z_a dimension must be divisible by num_splits for split decoder")
-    if actions.shape[1] % num_splits != 0:
-        raise ValueError("Action dimension must be divisible by num_splits for split decoder")
+                total_loss += loss.item()
+                total_batches += 1
 
-    z_q_chunk_dim = z_q.shape[1] // num_splits
-    z_a_chunk_dim = z_a.shape[1] // num_splits
-    act_chunk_dim = actions.shape[1] // num_splits
+            mean_train_loss = total_loss / max(1, total_batches)
+            history["train_loss"].append(mean_train_loss)
 
-    z_q_split = z_q.reshape(-1, num_splits, z_q_chunk_dim).reshape(-1, z_q_chunk_dim)
-    z_a_split = z_a.reshape(-1, num_splits, z_a_chunk_dim).reshape(-1, z_a_chunk_dim)
-    act_split = actions.reshape(-1, num_splits, act_chunk_dim).reshape(-1, act_chunk_dim)
+            if n_val > 0 and x_val.numel() > 0:
+                self.eval()
+                with torch.no_grad():
+                    val_pred = self(x_val)
+                    val_loss = loss_fn(val_pred, y_val).item()
+            else:
+                val_loss = float("nan")
+            history["val_loss"].append(val_loss)
 
-    model_q_split, hist_q_split = _train_single_decoder(z_q_split, act_split, cfg)
-    model_a_split, hist_a_split = _train_single_decoder(z_a_split, act_split, cfg)
-    models["z_q_split"] = model_q_split
-    models["z_a_split"] = model_a_split
-    histories["z_q_split"] = hist_q_split
-    histories["z_a_split"] = hist_a_split
-
-    return models, histories
+        return history
 
 def _pairwise_chebyshev(x: np.ndarray) -> np.ndarray:
     diff = np.abs(x[:, None, :] - x[None, :, :])
@@ -405,13 +296,10 @@ class LatentMetricsAggregator:
     def __init__(
         self,
         config: LatentMetricsConfig,
-        decoder_cfg: Optional[DecoderTrainConfig] = None,
     ):
         self.config = config
         self.rng = np.random.default_rng(config.seed)
 
-        # --- decoder / training config ---
-        self.decoder_cfg = decoder_cfg or DecoderTrainConfig()
         self.z_a_decoder: Optional[LatentToActionDecoder] = None
         self.z_q_decoder: Optional[LatentToActionDecoder] = None
         self.z_q_split_decoder: Optional[LatentToActionDecoder] = None
@@ -443,105 +331,96 @@ class LatentMetricsAggregator:
         z_q: np.ndarray,
         actions: np.ndarray,
     ) -> Dict[str, float]:
-            """
-            Train latent->action MLP decoders on all accumulated samples.
+        """
+        Train latent->action MLP decoders on all accumulated samples.
 
-            Stores:
-                self.z_a_decoder, self.z_q_decoder
-                self.decoder_histories = { "z_a": history, "z_q": history }
+        Stores:
+            self.z_a_decoder, self.z_q_decoder
+            self.decoder_histories = { "z_a": history, "z_q": history }
 
-            Returns a dict of scalar metrics (e.g. last-epoch losses) that
-            can be merged into the overall metrics dict in `compute()`.
-            """
-            metrics: Dict[str, float] = {}
+        Returns a dict of scalar metrics (e.g. last-epoch losses) that
+        can be merged into the overall metrics dict in `compute()`.
+        """
+        metrics: Dict[str, float] = {}
 
-            if z_a.size == 0 or z_q.size == 0 or actions.size == 0:
-                return metrics
-
-            # Convert to tensors
-            z_a_t = torch.from_numpy(z_a).float()
-            z_q_t = torch.from_numpy(z_q).float()
-            act_t = torch.from_numpy(actions).float()
-
-            # Lazily create decoders if we don't know dims until now
-            if self.z_a_decoder is None:
-                self.z_a_decoder = LatentToActionDecoder(
-                    input_dim=z_a_t.shape[1],
-                    action_dim=act_t.shape[1],
-                )
-            if self.z_q_decoder is None:
-                self.z_q_decoder = LatentToActionDecoder(
-                    input_dim=z_q_t.shape[1],
-                    action_dim=act_t.shape[1],
-                )
-            if self.z_q_split_decoder is None:
-                assert (
-                    z_q_t.shape[1] % self.config.num_splits == 0
-                ), "z_q dimensionality must be divisible by num_splits"
-                assert (
-                    act_t.shape[1] % self.config.num_splits == 0
-                ), "Action dimensionality must be divisible by num_splits"
-
-                self.z_q_split_decoder = LatentToActionDecoder(
-                    input_dim=z_q_t.shape[1] // self.config.num_splits,
-                    action_dim=act_t.shape[1] // self.config.num_splits,
-                )
-            if self.z_a_split_decoder is None:
-                assert (
-                    z_a_t.shape[1] % self.config.num_splits == 0
-                ), "z_a dimensionality must be divisible by num_splits"
-                assert (
-                    act_t.shape[1] % self.config.num_splits == 0
-                ), "Action dimensionality must be divisible by num_splits"
-
-                self.z_a_split_decoder = LatentToActionDecoder(
-                    input_dim=z_a_t.shape[1] // self.config.num_splits,
-                    action_dim=act_t.shape[1] // self.config.num_splits,
-                )
-
-            # Train / continue training
-            self.z_a_decoder, hist_a = _train_single_decoder(
-                z_a_t, act_t, self.decoder_cfg, model=self.z_a_decoder
-            )
-            self.z_q_decoder, hist_q = _train_single_decoder(
-                z_q_t, act_t, self.decoder_cfg, model=self.z_q_decoder
-            )
-
-            z_q_split = z_q_t.reshape(
-                -1, self.config.num_splits, z_q_t.shape[1] // self.config.num_splits
-            ).reshape(-1, z_q_t.shape[1] // self.config.num_splits)
-            z_a_split = z_a_t.reshape(
-                -1, self.config.num_splits, z_a_t.shape[1] // self.config.num_splits
-            ).reshape(-1, z_a_t.shape[1] // self.config.num_splits)
-            act_split = act_t.reshape(
-                -1, self.config.num_splits, act_t.shape[1] // self.config.num_splits
-            ).reshape(-1, act_t.shape[1] // self.config.num_splits)
-
-            self.z_q_split_decoder, hist_q_split = _train_single_decoder(
-                z_q_split, act_split, self.decoder_cfg, model=self.z_q_split_decoder
-            )
-            self.z_a_split_decoder, hist_a_split = _train_single_decoder(
-                z_a_split, act_split, self.decoder_cfg, model=self.z_a_split_decoder
-            )
-
-            self.decoder_histories = {
-                "z_a": hist_a,
-                "z_q": hist_q,
-                "z_q_split": hist_q_split,
-                "z_a_split": hist_a_split,
-            }
-
-            # Use last-epoch MSE as basic scalar metrics for now
-            metrics["z_a_decoder_train_mse"] = hist_a["train_loss"][-1]
-            metrics["z_a_decoder_val_mse"] = hist_a["val_loss"][-1]
-            metrics["z_q_decoder_train_mse"] = hist_q["train_loss"][-1]
-            metrics["z_q_decoder_val_mse"] = hist_q["val_loss"][-1]
-            metrics["z_q_split_decoder_train_mse"] = hist_q_split["train_loss"][-1]
-            metrics["z_q_split_decoder_val_mse"] = hist_q_split["val_loss"][-1]
-            metrics["z_a_split_decoder_train_mse"] = hist_a_split["train_loss"][-1]
-            metrics["z_a_split_decoder_val_mse"] = hist_a_split["val_loss"][-1]
-
+        if z_a.size == 0 or z_q.size == 0 or actions.size == 0:
             return metrics
+
+        # Convert to tensors
+        z_a_t = torch.from_numpy(z_a).float()
+        z_q_t = torch.from_numpy(z_q).float()
+        act_t = torch.from_numpy(actions).float()
+
+        # Lazily create decoders if we don't know dims until now
+        if self.z_a_decoder is None:
+            self.z_a_decoder = LatentToActionDecoder(
+                input_dim=z_a_t.shape[1],
+                action_dim=act_t.shape[1],
+            )
+        if self.z_q_decoder is None:
+            self.z_q_decoder = LatentToActionDecoder(
+                input_dim=z_q_t.shape[1],
+                action_dim=act_t.shape[1],
+            )
+        if self.z_q_split_decoder is None:
+            assert (
+                z_q_t.shape[1] % self.config.num_splits == 0
+            ), "z_q dimensionality must be divisible by num_splits"
+            assert (
+                act_t.shape[1] % self.config.num_splits == 0
+            ), "Action dimensionality must be divisible by num_splits"
+
+            self.z_q_split_decoder = LatentToActionDecoder(
+                input_dim=z_q_t.shape[1] // self.config.num_splits,
+                action_dim=act_t.shape[1] // self.config.num_splits,
+            )
+        if self.z_a_split_decoder is None:
+            assert (
+                z_a_t.shape[1] % self.config.num_splits == 0
+            ), "z_a dimensionality must be divisible by num_splits"
+            assert (
+                act_t.shape[1] % self.config.num_splits == 0
+            ), "Action dimensionality must be divisible by num_splits"
+
+            self.z_a_split_decoder = LatentToActionDecoder(
+                input_dim=z_a_t.shape[1] // self.config.num_splits,
+                action_dim=act_t.shape[1] // self.config.num_splits,
+            )
+
+        hist_a = self.z_a_decoder.fit(z_a_t, act_t)
+        hist_q = self.z_q_decoder.fit(z_q_t, act_t)
+
+        z_q_split = z_q_t.reshape(
+            -1, self.config.num_splits, z_q_t.shape[1] // self.config.num_splits
+        ).reshape(-1, z_q_t.shape[1] // self.config.num_splits)
+        z_a_split = z_a_t.reshape(
+            -1, self.config.num_splits, z_a_t.shape[1] // self.config.num_splits
+        ).reshape(-1, z_a_t.shape[1] // self.config.num_splits)
+        act_split = act_t.reshape(
+            -1, self.config.num_splits, act_t.shape[1] // self.config.num_splits
+        ).reshape(-1, act_t.shape[1] // self.config.num_splits)
+
+        hist_q_split = self.z_q_split_decoder.fit(z_q_split, act_split)
+        hist_a_split = self.z_a_split_decoder.fit(z_a_split, act_split)
+
+        self.decoder_histories = {
+            "z_a": hist_a,
+            "z_q": hist_q,
+            "z_q_split": hist_q_split,
+            "z_a_split": hist_a_split,
+        }
+
+        # Use last-epoch MSE as basic scalar metrics for now
+        metrics["z_a_decoder_train_mse"] = hist_a["train_loss"][-1]
+        metrics["z_a_decoder_val_mse"] = hist_a["val_loss"][-1]
+        metrics["z_q_decoder_train_mse"] = hist_q["train_loss"][-1]
+        metrics["z_q_decoder_val_mse"] = hist_q["val_loss"][-1]
+        metrics["z_q_split_decoder_train_mse"] = hist_q_split["train_loss"][-1]
+        metrics["z_q_split_decoder_val_mse"] = hist_q_split["val_loss"][-1]
+        metrics["z_a_split_decoder_train_mse"] = hist_a_split["train_loss"][-1]
+        metrics["z_a_split_decoder_val_mse"] = hist_a_split["val_loss"][-1]
+
+        return metrics
 
     def _predict_actions_from_z_q_split(self, z_q: np.ndarray) -> np.ndarray:
         """Run the trained z_q split decoder to predict primitive actions."""
@@ -646,10 +525,25 @@ class LatentMetricsAggregator:
         self.actions: List[np.ndarray] = []
         self.state_curr: List[np.ndarray] = []
         self.state_next: List[np.ndarray] = []
-        self.labels: List[np.ndarray] = []
+        self.primitive_labels: List[np.ndarray] = []
+        self.composite_labels: List[np.ndarray] = []
         self.code_indices: List[np.ndarray] = []
         self.pred_errors: List[np.ndarray] = []
         self.pred_error_labels: List[np.ndarray] = []
+
+    def _collapse_labels(self, labels: np.ndarray) -> np.ndarray:
+        """Reduce per-split labels to a single composite label via majority vote."""
+
+        composite: List[int] = []
+        for row in labels:
+            vals, counts = np.unique(row, return_counts=True)
+            maxc = counts.max()
+            majority = vals[counts == maxc]
+            if majority.size == 1:
+                composite.append(int(majority[0]))
+            else:
+                composite.append(int(row[0]))
+        return np.array(composite, dtype=int)
 
     def _actions_to_labels(self, actions: np.ndarray) -> np.ndarray:
         """
@@ -749,6 +643,8 @@ class LatentMetricsAggregator:
             )
             codes = code_indices[:, :valid_steps]                 # (B, valid_steps, self.num_splits)
             labels = self._actions_to_labels(act_curr)           # (M, self.num_splits)
+            composite_labels = self._collapse_labels(labels)
+            primitive_labels = labels.reshape(-1)
             codes_flat = codes.reshape(-1).cpu().numpy()          # (M * self.num_splits,)                           # (M * self.num_splits,)
 
 
@@ -757,7 +653,8 @@ class LatentMetricsAggregator:
             self.actions.append(act_curr)
             self.state_curr.append(state_t)
             self.state_next.append(state_tp1)
-            self.labels.append(labels)
+            self.composite_labels.append(composite_labels)
+            self.primitive_labels.append(primitive_labels)
             self.code_indices.append(codes_flat)
 
             if per_step_errors is not None and per_step_error_actions is not None:
@@ -1020,14 +917,15 @@ class LatentMetricsAggregator:
         actions = self._stack(self.actions)
         state_t = self._stack(self.state_curr)
         state_tp1 = self._stack(self.state_next)
-        labels = self._stack(self.labels)
+        composite_labels = self._stack(self.composite_labels)
+        primitive_labels = self._stack(self.primitive_labels)
         codes = self._stack(self.code_indices).astype(int)
 
 
         metrics.update(self._compute_code_usage(codes))
 
-        intra_a, inter_a = compute_class_variances(z_a, labels)
-        intra_q, inter_q = compute_class_variances(z_q, labels)
+        intra_a, inter_a = compute_class_variances(z_a, composite_labels)
+        intra_q, inter_q = compute_class_variances(z_q, composite_labels)
         metrics.update(
             {
                 "z_a_intra_class_var": intra_a,
@@ -1042,10 +940,10 @@ class LatentMetricsAggregator:
         metrics.update(
             {
                 "z_a_knn_consistency": knn_consistency(
-                    z_a, labels, self.config.knn_k, self.rng, self.config.max_samples
+                    z_a, composite_labels, self.config.knn_k, self.rng, self.config.max_samples
                 ),
                 "z_q_knn_consistency": knn_consistency(
-                    z_q, labels, self.config.knn_k, self.rng, self.config.max_samples
+                    z_q, composite_labels, self.config.knn_k, self.rng, self.config.max_samples
                 ),
             }
         )
@@ -1062,13 +960,12 @@ class LatentMetricsAggregator:
         )
 
 
-        confusion_fig = self._build_confusion_heatmap(codes, labels)
+        confusion_fig = self._build_confusion_heatmap(codes, primitive_labels)
         if confusion_fig is not None:
             figures["code_action_confusion"] = confusion_fig
-        metrics.update(label_stats)
-        metrics.update(self._compute_usage_overlap(codes, labels))
+        metrics.update(self._compute_usage_overlap(codes, primitive_labels))
 
-        fig_a, fig_q, fig_qs = self._compute_umap_triplet(z_a, z_q, labels)
+        fig_a, fig_q, fig_qs = self._compute_umap_triplet(z_a, z_q, primitive_labels)
         if fig_a is not None:
             figures["umap_z_a"] = fig_a
         if fig_q is not None:
