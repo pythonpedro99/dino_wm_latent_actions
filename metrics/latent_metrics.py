@@ -199,23 +199,25 @@ def knn_consistency(
     labels: np.ndarray,
     k: int,
     rng: np.random.Generator,
-    max_samples: int
+    max_samples: int,
 ) -> float:
+    """
+    k-NN label consistency for composite labels.
+
+    Args:
+        features: (N, D)
+        labels:   (N,) composite action labels.
+    """
+    if features.shape[0] == 0 or labels.shape[0] == 0:
+        return float("nan")
+
+    if labels.ndim != 1:
+        raise ValueError(
+            f"knn_consistency expects composite labels with shape (N,), got {labels.shape}"
+        )
 
     if features.shape[0] <= k:
         return float("nan")
-
-    if labels.ndim == 2:
-        composite = []
-        for row in labels:
-            vals, counts = np.unique(row, return_counts=True)
-            maxc = counts.max()
-            majority = vals[counts == maxc]
-            if majority.size == 1:
-                composite.append(majority[0])
-            else:
-                composite.append(row[0])
-        labels = np.array(composite, dtype=int)
 
     features, indices = _sample_with_indices(features, max_samples, rng)
     labels = labels[indices]
@@ -232,21 +234,25 @@ def knn_consistency(
     matches = (neighbor_labels == labels[:, None]).mean(axis=1)
     return float(np.mean(matches))
 
-def compute_class_variances(features: np.ndarray, labels: np.ndarray) -> Tuple[float, float]:
+
+def compute_class_variances(
+    features: np.ndarray,
+    labels: np.ndarray,
+) -> Tuple[float, float]:
+    """
+    Compute intra- and inter-class variance for composite labels.
+
+    Args:
+        features: (N, D)
+        labels:   (N,) composite labels
+    """
     if features.size == 0 or labels.size == 0:
         return float("nan"), float("nan")
 
-    if labels.ndim == 2:
-        composite = []
-        for row in labels:
-            vals, counts = np.unique(row, return_counts=True)
-            maxc = counts.max()
-            majority = vals[counts == maxc]
-            if majority.size == 1:
-                composite.append(majority[0])
-            else:
-                composite.append(row[0])
-        labels = np.array(composite, dtype=int)
+    if labels.ndim != 1:
+        raise ValueError(
+            f"compute_class_variances expects composite labels with shape (N,), got {labels.shape}"
+        )
 
     unique_labels = np.unique(labels)
     class_means = []
@@ -364,41 +370,41 @@ class LatentMetricsAggregator:
             )
         if self.z_q_split_decoder is None:
             assert (
-                z_q_t.shape[1] % self.config.num_splits == 0
+                z_q_t.shape[1] % self.num_splits == 0
             ), "z_q dimensionality must be divisible by num_splits"
             assert (
-                act_t.shape[1] % self.config.num_splits == 0
+                act_t.shape[1] % self.num_splits == 0
             ), "Action dimensionality must be divisible by num_splits"
 
             self.z_q_split_decoder = LatentToActionDecoder(
-                input_dim=z_q_t.shape[1] // self.config.num_splits,
-                action_dim=act_t.shape[1] // self.config.num_splits,
+                input_dim=z_q_t.shape[1] // self.num_splits,
+                action_dim=act_t.shape[1] // self.num_splits,
             )
         if self.z_a_split_decoder is None:
             assert (
-                z_a_t.shape[1] % self.config.num_splits == 0
+                z_a_t.shape[1] % self.num_splits == 0
             ), "z_a dimensionality must be divisible by num_splits"
             assert (
-                act_t.shape[1] % self.config.num_splits == 0
+                act_t.shape[1] % self.num_splits == 0
             ), "Action dimensionality must be divisible by num_splits"
 
             self.z_a_split_decoder = LatentToActionDecoder(
-                input_dim=z_a_t.shape[1] // self.config.num_splits,
-                action_dim=act_t.shape[1] // self.config.num_splits,
+                input_dim=z_a_t.shape[1] // self.num_splits,
+                action_dim=act_t.shape[1] // self.num_splits,
             )
 
         hist_a = self.z_a_decoder.fit(z_a_t, act_t)
         hist_q = self.z_q_decoder.fit(z_q_t, act_t)
 
         z_q_split = z_q_t.reshape(
-            -1, self.config.num_splits, z_q_t.shape[1] // self.config.num_splits
-        ).reshape(-1, z_q_t.shape[1] // self.config.num_splits)
+            -1, self.num_splits, z_q_t.shape[1] // self.num_splits
+        ).reshape(-1, z_q_t.shape[1] // self.num_splits)
         z_a_split = z_a_t.reshape(
-            -1, self.config.num_splits, z_a_t.shape[1] // self.config.num_splits
-        ).reshape(-1, z_a_t.shape[1] // self.config.num_splits)
+            -1, self.num_splits, z_a_t.shape[1] // self.num_splits
+        ).reshape(-1, z_a_t.shape[1] // self.num_splits)
         act_split = act_t.reshape(
-            -1, self.config.num_splits, act_t.shape[1] // self.config.num_splits
-        ).reshape(-1, act_t.shape[1] // self.config.num_splits)
+            -1, self.num_splits, act_t.shape[1] // self.num_splits
+        ).reshape(-1, act_t.shape[1] // self.num_splits)
 
         hist_q_split = self.z_q_split_decoder.fit(z_q_split, act_split)
         hist_a_split = self.z_a_split_decoder.fit(z_a_split, act_split)
@@ -431,15 +437,15 @@ class LatentMetricsAggregator:
         device = next(self.z_q_split_decoder.parameters()).device
         z_q_t = torch.from_numpy(z_q).float().to(device)
         z_q_split = z_q_t.reshape(
-            -1, self.config.num_splits, z_q_t.shape[1] // self.config.num_splits
-        ).reshape(-1, z_q_t.shape[1] // self.config.num_splits)
+            -1, self.num_splits, z_q_t.shape[1] // self.num_splits
+        ).reshape(-1, z_q_t.shape[1] // self.num_splits)
 
         self.z_q_split_decoder.eval()
         with torch.no_grad():
             pred_split = self.z_q_split_decoder(z_q_split).cpu().numpy()
 
-        return pred_split.reshape(-1, self.config.num_splits, pred_split.shape[1]).reshape(
-            -1, pred_split.shape[1] * self.config.num_splits
+        return pred_split.reshape(-1, self.num_splits, pred_split.shape[1]).reshape(
+            -1, pred_split.shape[1] * self.num_splits
         )
 
     def _compute_confusion_matrix(
@@ -548,22 +554,33 @@ class LatentMetricsAggregator:
     def _actions_to_labels(self, actions: np.ndarray) -> np.ndarray:
         """
         Convert stacked 2-D centroid actions into their centroid indices.
-        Works with arbitrary self.num_splits (inferred from shape).
+
         Input:
-            actions: (N, self.num_splits*2)
+            actions: (N, num_splits * 2)
         Output:
-            labels: (N, self.num_splits) with integer centroid IDs in {0..8}
+            labels:  (N, num_splits) with integer centroid IDs in {0..8}
         """
         base_action_dim = 2
-        self.num_splits = actions.shape[1] // base_action_dim
+        expected_dim = self.num_splits * base_action_dim
+
+        if actions.ndim != 2:
+            raise ValueError(f"actions must be 2D, got shape {actions.shape}")
+        if actions.shape[1] != expected_dim:
+            raise ValueError(
+                f"actions second dim must be num_splits * 2 = {expected_dim}, "
+                f"got {actions.shape[1]}"
+            )
+
         actions = actions.reshape(-1, self.num_splits, base_action_dim)
         N = actions.shape[0]
         labels = np.zeros((N, self.num_splits), dtype=np.int64)
+
         for i in range(self.num_splits):
-            sub = actions[:, i, :]                         # (N,2)
-            diff = sub[:, None, :] - self.centroids[None, :, :]  # (N,9,2)
-            dist = np.sum(diff * diff, axis=2)                    # (N,9)
-            labels[:, i] = np.argmin(dist, axis=1)                # best centroid
+            sub = actions[:, i, :]  # (N, 2)
+            diff = sub[:, None, :] - self.centroids[None, :, :]  # (N, 9, 2)
+            dist = np.sum(diff * diff, axis=2)  # (N, 9)
+            labels[:, i] = np.argmin(dist, axis=1)
+
         return labels
 
     def update(
@@ -641,10 +658,19 @@ class LatentMetricsAggregator:
                 .cpu()
                 .numpy()
             )
-            codes = code_indices[:, :valid_steps]                 # (B, valid_steps, self.num_splits)
+            codes = code_indices[:, :valid_steps]   # (B, valid_steps, self.num_splits)
+            
+            # Sanity checks for num_splits consistency
+            assert codes.shape[-1] == self.num_splits, (
+                f"code_indices last dim {codes.shape[-1]} != num_splits {self.num_splits}"
+            )
+            assert act_curr.shape[1] == 2 * self.num_splits, (
+                f"actions dim {act_curr.shape[1]} != 2 * num_splits {2 * self.num_splits}"
+            )
+                          
             labels = self._actions_to_labels(act_curr)           # (M, self.num_splits)
             composite_labels = self._collapse_labels(labels)
-            primitive_labels = labels.reshape(-1)
+            primitive_labels = labels
             codes_flat = codes.reshape(-1).cpu().numpy()          # (M * self.num_splits,)                           # (M * self.num_splits,)
 
 
@@ -769,40 +795,51 @@ class LatentMetricsAggregator:
             "code_action_jaccard_mean": mean_overlap,
             "codes_per_action_mean": mean_codes_per_action,
         }
-
+    
 
     def _compute_umap_triplet(
-    self,
-    z_a: np.ndarray,
-    z_q: np.ndarray,
-    labels: np.ndarray,
-) -> Tuple[
-    Optional["matplotlib.figure.Figure"],
-    Optional["matplotlib.figure.Figure"],
-    Optional["matplotlib.figure.Figure"],
-]:
+        self,
+        z_a: np.ndarray,
+        z_q: np.ndarray,
+        composite_labels: np.ndarray,
+        primitive_labels: np.ndarray,
+    ) -> Tuple[
+        Optional["matplotlib.figure.Figure"],
+        Optional["matplotlib.figure.Figure"],
+        Optional["matplotlib.figure.Figure"],
+    ]:
+        """
+        Build three UMAP plots:
+        - z_a colored by composite action labels
+        - z_q colored by composite action labels
+        - z_q split chunks colored by primitive labels
+        """
+        if (
+            z_a.size == 0
+            or z_q.size == 0
+            or composite_labels.size == 0
+            or primitive_labels.size == 0
+        ):
+            return None, None, None
 
-        assert labels.ndim == 1
-        assert (
-            labels.shape[0] % self.config.num_splits == 0
-        ), "Labels length must align with num_splits"
+        assert composite_labels.ndim == 1, (
+            f"composite_labels must be (N,), got {composite_labels.shape}"
+        )
+        assert primitive_labels.ndim == 2, (
+            f"primitive_labels must be (N, num_splits), got {primitive_labels.shape}"
+        )
 
-        N_full = labels.shape[0] // self.config.num_splits
-        labels_5 = labels.reshape(N_full, self.config.num_splits)
-
-        labels_composite = []
-        for row in labels_5:
-            vals, counts = np.unique(row, return_counts=True)
-            max_count = counts.max()
-            majority = vals[counts == max_count]
-            if majority.size == 1:
-                labels_composite.append(majority[0])
-            else:
-                labels_composite.append(row[0])
-        labels_composite = np.array(labels_composite, dtype=int)
-
+        N_full = composite_labels.shape[0]
         assert z_a.shape[0] == N_full, "z_a rows must match number of action stacks"
         assert z_q.shape[0] == N_full, "z_q rows must match number of action stacks"
+        assert primitive_labels.shape[0] == N_full, (
+            "primitive_labels first dim must match number of action stacks"
+        )
+
+        num_splits = primitive_labels.shape[1]
+        assert num_splits == self.num_splits, (
+            f"primitive_labels second dim {num_splits} != num_splits {self.num_splits}"
+        )
 
         N = min(N_full, self.config.umap_points)
         if N_full <= N:
@@ -812,19 +849,21 @@ class LatentMetricsAggregator:
 
         z_a_s = z_a[idx]
         z_q_s = z_q[idx]
-        lbl_comp_s = labels_composite[idx]
+        lbl_comp_s = composite_labels[idx]          # (N,)
+        lbl_prim_s = primitive_labels[idx]          # (N, num_splits)
 
+        # Standardize
         scaler_a = StandardScaler().fit(z_a_s)
         z_a_s = scaler_a.transform(z_a_s)
 
         scaler_q = StandardScaler().fit(z_q_s)
         z_q_s = scaler_q.transform(z_q_s)
 
-        chunk_dim = z_q.shape[1] // self.config.num_splits
-        z_q_split = z_q_s.reshape(N, self.config.num_splits, chunk_dim).reshape(
-            N * self.config.num_splits, chunk_dim
+        chunk_dim = z_q.shape[1] // num_splits
+        z_q_split = z_q_s.reshape(N, num_splits, chunk_dim).reshape(
+            N * num_splits, chunk_dim
         )
-        lbl_split = labels_5[idx].reshape(-1)
+        lbl_split = lbl_prim_s.reshape(-1)          # (N * num_splits,)
 
         try:
             import matplotlib.pyplot as plt
@@ -844,24 +883,36 @@ class LatentMetricsAggregator:
         emb_q_split = reducer.fit_transform(z_q_split)
 
         fig_a, ax = plt.subplots(figsize=(6, 5))
-        sc = ax.scatter(emb_a[:, 0], emb_a[:, 1], c=lbl_comp_s, cmap="tab10", s=6, alpha=0.8)
-        ax.set_title("UMAP z_a")
+        sc = ax.scatter(
+            emb_a[:, 0], emb_a[:, 1], c=lbl_comp_s, cmap="tab10", s=6, alpha=0.8
+        )
+        ax.set_title("UMAP z_a (composite)")
         fig_a.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
         fig_a.tight_layout()
 
         fig_q, ax = plt.subplots(figsize=(6, 5))
-        sc = ax.scatter(emb_q[:, 0], emb_q[:, 1], c=lbl_comp_s, cmap="tab10", s=6, alpha=0.8)
-        ax.set_title("UMAP z_q")
+        sc = ax.scatter(
+            emb_q[:, 0], emb_q[:, 1], c=lbl_comp_s, cmap="tab10", s=6, alpha=0.8
+        )
+        ax.set_title("UMAP z_q (composite)")
         fig_q.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
         fig_q.tight_layout()
 
         fig_qs, ax = plt.subplots(figsize=(6, 5))
-        sc = ax.scatter(emb_q_split[:, 0], emb_q_split[:, 1], c=lbl_split, cmap="tab10", s=6, alpha=0.8)
-        ax.set_title("UMAP z_q split")
+        sc = ax.scatter(
+            emb_q_split[:, 0],
+            emb_q_split[:, 1],
+            c=lbl_split,
+            cmap="tab10",
+            s=6,
+            alpha=0.8,
+        )
+        ax.set_title("UMAP z_q split (primitive)")
         fig_qs.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
         fig_qs.tight_layout()
 
         return fig_a, fig_q, fig_qs
+
 
     def _build_confusion_heatmap(
         self, codes: np.ndarray, labels: np.ndarray
@@ -904,26 +955,34 @@ class LatentMetricsAggregator:
         return fig
 
 
-    def compute(self) -> Tuple[Dict[str, float], Dict[str, List[Dict[str, float]]], Dict[str, object]]:
+    def compute(
+        self,
+    ) -> Tuple[Dict[str, float], Dict[str, List[Dict[str, float]]], Dict[str, object]]:
         metrics: Dict[str, float] = {}
-        tables: Dict[str, List[Dict[str, float]]] = {}
         figures: Dict[str, object] = {}
 
         if not self.latent_actions:
-            return metrics, tables, figures
+            return metrics, figures
 
         z_a = self._stack(self.latent_actions)
         z_q = self._stack(self.quantized_actions)
         actions = self._stack(self.actions)
         state_t = self._stack(self.state_curr)
         state_tp1 = self._stack(self.state_next)
-        composite_labels = self._stack(self.composite_labels)
-        primitive_labels = self._stack(self.primitive_labels)
-        codes = self._stack(self.code_indices).astype(int)
+        composite_labels = self._stack(self.composite_labels)    # (N,)
+        primitive_labels = self._stack(self.primitive_labels)    # (N, num_splits)
+        codes = self._stack(self.code_indices).astype(int)       # (N * num_splits,)
 
+        # Sanity: primitive labels shape
+        if primitive_labels.size > 0 and primitive_labels.ndim != 2:
+            raise ValueError(
+                f"primitive_labels expected shape (N, num_splits), got {primitive_labels.shape}"
+            )
 
+        # --- Code usage (no labels) ---
         metrics.update(self._compute_code_usage(codes))
 
+        # --- Class variances & FDR: use composite labels ---
         intra_a, inter_a = compute_class_variances(z_a, composite_labels)
         intra_q, inter_q = compute_class_variances(z_q, composite_labels)
         metrics.update(
@@ -937,6 +996,7 @@ class LatentMetricsAggregator:
             }
         )
 
+        # --- kNN consistency: use composite labels ---
         metrics.update(
             {
                 "z_a_knn_consistency": knn_consistency(
@@ -948,24 +1008,43 @@ class LatentMetricsAggregator:
             }
         )
 
+        # --- Mutual information: uses continuous actions/states directly ---
         metrics.update(
             {
                 "mi_z_a_action": knn_mutual_information(z_a, actions, self.config.mi_k, self.rng),
-                "mi_z_a_state_t": knn_mutual_information(z_a, state_t, self.config.mi_k, self.rng),
-                "mi_z_a_state_tp1": knn_mutual_information(z_a, state_tp1, self.config.mi_k, self.rng),
+                "mi_z_a_state_t": knn_mutual_information(
+                    z_a, state_t, self.config.mi_k, self.rng
+                ),
+                "mi_z_a_state_tp1": knn_mutual_information(
+                    z_a, state_tp1, self.config.mi_k, self.rng
+                ),
                 "mi_z_q_action": knn_mutual_information(z_q, actions, self.config.mi_k, self.rng),
-                "mi_z_q_state_t": knn_mutual_information(z_q, state_t, self.config.mi_k, self.rng),
-                "mi_z_q_state_tp1": knn_mutual_information(z_q, state_tp1, self.config.mi_k, self.rng),
+                "mi_z_q_state_t": knn_mutual_information(
+                    z_q, state_t, self.config.mi_k, self.rng
+                ),
+                "mi_z_q_state_tp1": knn_mutual_information(
+                    z_q, state_tp1, self.config.mi_k, self.rng
+                ),
             }
         )
 
+        # --- Primitive labels flattened for code–action metrics ---
+        primitive_labels_flat = (
+            primitive_labels.reshape(-1) if primitive_labels.size > 0 else primitive_labels
+        )
 
-        confusion_fig = self._build_confusion_heatmap(codes, primitive_labels)
+        # Code–primitive-action confusion heatmap
+        confusion_fig = self._build_confusion_heatmap(codes, primitive_labels_flat)
         if confusion_fig is not None:
             figures["code_action_confusion"] = confusion_fig
-        metrics.update(self._compute_usage_overlap(codes, primitive_labels))
 
-        fig_a, fig_q, fig_qs = self._compute_umap_triplet(z_a, z_q, primitive_labels)
+        # Code–primitive-action usage overlap
+        metrics.update(self._compute_usage_overlap(codes, primitive_labels_flat))
+
+        # --- UMAP triplet: composite + primitive labels ---
+        fig_a, fig_q, fig_qs = self._compute_umap_triplet(
+            z_a, z_q, composite_labels, primitive_labels
+        )
         if fig_a is not None:
             figures["umap_z_a"] = fig_a
         if fig_q is not None:
@@ -977,6 +1056,8 @@ class LatentMetricsAggregator:
         decoder_metrics = self._train_action_decoders(z_a, z_q, actions)
         metrics.update(decoder_metrics)
 
+        # --- Split decoder classification metrics: uses primitive labels derived on the fly ---
         metrics.update(self._compute_split_decoder_classification_metrics(z_q, actions))
 
-        return metrics, tables, figures
+        return metrics, figures
+
