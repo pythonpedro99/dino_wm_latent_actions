@@ -702,6 +702,20 @@ class LatentMetricsAggregator:
         return np.concatenate(tensors, axis=0)
 
     def _compute_code_usage(self, codes: np.ndarray) -> Dict[str, float]:
+        if codes.size == 0:
+            return {
+                "code_perplexity": float("nan"),
+                "dead_code_fraction": float("nan"),
+                "bits_per_action": float("nan"),
+            }
+
+        if codes.min() < 0:
+            raise ValueError(f"codes must be non-negative, got min={codes.min()}")
+        if codes.max() >= self.config.num_codes:
+            raise ValueError(
+                f"Encountered code index {codes.max()} >= num_codes={self.config.num_codes}"
+            )
+
         hist = np.bincount(codes, minlength=self.config.num_codes)
         total = hist.sum()
         probs = hist / max(total, 1)
@@ -835,6 +849,11 @@ class LatentMetricsAggregator:
         assert primitive_labels.shape[0] == N_full, (
             "primitive_labels first dim must match number of action stacks"
         )
+        
+        assert z_q.shape[1] % num_splits == 0, (
+            f"z_q dim {z_q.shape[1]} must be divisible by num_splits={num_splits}"
+        )
+
 
         num_splits = primitive_labels.shape[1]
         assert num_splits == self.num_splits, (
@@ -972,6 +991,7 @@ class LatentMetricsAggregator:
         composite_labels = self._stack(self.composite_labels)    # (N,)
         primitive_labels = self._stack(self.primitive_labels)    # (N, num_splits)
         codes = self._stack(self.code_indices).astype(int)       # (N * num_splits,)
+
 
         # Sanity: primitive labels shape
         if primitive_labels.size > 0 and primitive_labels.ndim != 2:
