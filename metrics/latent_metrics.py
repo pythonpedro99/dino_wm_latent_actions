@@ -47,6 +47,12 @@ class LatentToActionDecoder(torch.nn.Module):
 
         self.to(self.device)
 
+    def reset_parameters(self):
+        """Reinitialize all weights of the MLP."""
+        for module in self.modules():
+            if hasattr(module, "reset_parameters"):
+                module.reset_parameters()
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
@@ -63,6 +69,7 @@ class LatentToActionDecoder(torch.nn.Module):
         """
 
         from torch.utils.data import DataLoader, TensorDataset
+        self.reset_parameters()
 
         x = x.to(self.device)
         y = y.to(self.device)
