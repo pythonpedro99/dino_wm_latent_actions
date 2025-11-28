@@ -828,16 +828,7 @@ class LatentMetricsAggregator:
         z_a: np.ndarray,
         z_q: np.ndarray,
         composite_labels: np.ndarray,
-    ) -> Tuple[
-        Optional["matplotlib.figure.Figure"],
-        Optional["matplotlib.figure.Figure"],
-    ]:
-        """
-        Build two UMAP plots:
-        - z_a colored by composite action labels
-        - z_q colored by composite action labels
-        """
-        # Sanity checks
+    ):
         if (
             z_a.size == 0
             or z_q.size == 0
@@ -845,39 +836,27 @@ class LatentMetricsAggregator:
         ):
             return None, None
 
-        assert composite_labels.ndim == 1, (
-            f"composite_labels must be (N,), got {composite_labels.shape}"
+        assert composite_labels.ndim == 1
+
+        # Subsample
+        N_full = z_a.shape[0]
+        N = min(N_full, self.config.umap_points)
+        idx = (
+            np.arange(N_full)
+            if N_full <= N
+            else self.rng.permutation(N_full)[:N]
         )
 
-        N_full = composite_labels.shape[0]
-        assert z_a.shape[0] == N_full, "z_a rows must match number of action stacks"
-        assert z_q.shape[0] == N_full, "z_q rows must match number of action stacks"
+        z_a_s = StandardScaler().fit_transform(z_a[idx])
+        z_q_s = StandardScaler().fit_transform(z_q[idx])
+        labels = composite_labels[idx]
 
-        # Subsample to limit computation
-        N = min(N_full, self.config.umap_points)
-        if N_full <= N:
-            idx = np.arange(N_full)
-        else:
-            idx = self.rng.permutation(N_full)[:N]
+        import matplotlib.pyplot as plt
+        import umap
 
-        z_a_s = z_a[idx]
-        z_q_s = z_q[idx]
-        lbl_comp_s = composite_labels[idx]   # (N,)
+        # Modern scientific style
+        plt.style.use("seaborn-v0_8-whitegrid")
 
-        # Standardize before UMAP
-        scaler_a = StandardScaler().fit(z_a_s)
-        z_a_s = scaler_a.transform(z_a_s)
-
-        scaler_q = StandardScaler().fit(z_q_s)
-        z_q_s = scaler_q.transform(z_q_s)
-
-        try:
-            import matplotlib.pyplot as plt
-            import umap
-        except Exception:
-            return None, None
-
-        # UMAP reducer
         reducer = umap.UMAP(
             n_neighbors=self.config.umap_neighbors,
             min_dist=self.config.umap_min_dist,
@@ -888,33 +867,41 @@ class LatentMetricsAggregator:
         emb_a = reducer.fit_transform(z_a_s)
         emb_q = reducer.fit_transform(z_q_s)
 
-        # ------------------------------
-        # Plot z_a (composite)
-        # ------------------------------
-        fig_a, ax = plt.subplots(figsize=(6, 5))
-        sc = ax.scatter(
-            emb_a[:, 0], emb_a[:, 1],
-            c=lbl_comp_s, cmap="tab10",
-            s=6, alpha=0.8,
-        )
-        ax.set_title("UMAP z_a (composite)")
-        #fig_a.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-        fig_a.tight_layout()
+        # Better colormap with 20 distinct high-quality colors
+        cmap = plt.get_cmap("tab20")
 
-        # ------------------------------
-        # Plot z_q (composite)
-        # ------------------------------
-        fig_q, ax = plt.subplots(figsize=(6, 5))
-        sc = ax.scatter(
-            emb_q[:, 0], emb_q[:, 1],
-            c=lbl_comp_s, cmap="tab10",
-            s=6, alpha=0.8,
-        )
-        ax.set_title("UMAP z_q (composite)")
-        #fig_q.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-        fig_q.tight_layout()
+        def nice_umap(emb, title):
+            fig, ax = plt.subplots(figsize=(6.5, 5.5))
+
+            ax.scatter(
+                emb[:, 0],
+                emb[:, 1],
+                c=labels,
+                cmap=cmap,
+                s=12,
+                alpha=0.7,
+                linewidth=0,
+                edgecolors="none",
+            )
+
+            ax.set_title(title, fontsize=14, pad=10)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.set_xlabel("")
+            ax.set_ylabel("")
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_visible(False)
+            ax.spines["bottom"].set_visible(False)
+
+            fig.tight_layout()
+            return fig
+
+        fig_a = nice_umap(emb_a, "UMAP z_a (composite)")
+        fig_q = nice_umap(emb_q, "UMAP z_q (composite)")
 
         return fig_a, fig_q
+
 
 
 
@@ -926,37 +913,68 @@ class LatentMetricsAggregator:
             return None
 
         num_actions = int(labels.max()) + 1
-        confusion = np.zeros((self.config.num_codes, num_actions), dtype=float)
+        num_codes = self.config.num_codes
+
+        # Build confusion matrix
+        confusion = np.zeros((num_codes, num_actions), dtype=float)
 
         for code, label in zip(codes.tolist(), labels.tolist()):
-            if 0 <= code < self.config.num_codes and 0 <= label < num_actions:
+            if 0 <= code < num_codes and 0 <= label < num_actions:
                 confusion[code, label] += 1
 
         try:
             import matplotlib.pyplot as plt
+            import numpy as np
         except Exception:
             return None
 
-        fig, ax = plt.subplots(figsize=(7, 5))
+        # Modern clean look
+        plt.style.use("seaborn-v0_8-white")
 
-        im = ax.imshow(confusion, cmap="magma", aspect="auto")
+        fig, ax = plt.subplots(figsize=(7.5, 6))
 
-        ax.set_xticks(np.arange(num_actions))
-        ax.set_yticks(np.arange(self.config.num_codes))
+        # Single-hue clean red heatmap
+        im = ax.imshow(confusion, cmap="Reds", aspect="auto")
+
+        # Grid lines
+        ax.set_xticks(np.arange(num_actions), minor=False)
+        ax.set_yticks(np.arange(num_codes), minor=False)
 
         ax.set_xticklabels([str(i) for i in range(num_actions)])
-        ax.set_yticklabels([str(i) for i in range(self.config.num_codes)])
+        ax.set_yticklabels([str(i) for i in range(num_codes)])
 
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
-        ax.set_xlabel("Primitive Action")
-        ax.set_ylabel("Code Index")
-        ax.set_title("Code–Action Confusion")
+        # Add grid (drawn *over* heatmap)
+        ax.set_xticks(np.arange(-.5, num_actions, 1), minor=True)
+        ax.set_yticks(np.arange(-.5, num_codes, 1), minor=True)
+        ax.grid(which="minor", color="white", linestyle="-", linewidth=1)
+        ax.tick_params(which="minor", bottom=False, left=False)
 
-        fig.colorbar(im, ax=ax, label="Count")
+        # Add numeric counts inside cells
+        max_val = confusion.max() if confusion.max() > 0 else 1
+        for i in range(num_codes):
+            for j in range(num_actions):
+                val = int(confusion[i, j])
+                color = "black" if confusion[i, j] < max_val * 0.6 else "white"
+                ax.text(
+                    j, i,
+                    str(val),
+                    ha="center", va="center",
+                    color=color, fontsize=9
+                )
+
+        ax.set_xlabel("Primitive Action", fontsize=12)
+        ax.set_ylabel("Code Index", fontsize=12)
+        ax.set_title("Code–Action Confusion Matrix", fontsize=14, pad=12)
+
+        # Modern compact colorbar
+        cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
+        cbar.set_label("Count", fontsize=11)
+
         fig.tight_layout()
-
         return fig
+
 
 
     def compute(
