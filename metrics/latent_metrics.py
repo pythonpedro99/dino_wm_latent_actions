@@ -49,7 +49,7 @@ class LatentToActionDecoder(torch.nn.Module):
 
     def reset_parameters(self):
         """Reinitialize all weights of the MLP."""
-        for module in self.modules():
+        for module in self.net.modules():
             if hasattr(module, "reset_parameters"):
                 module.reset_parameters()
 
