@@ -888,15 +888,13 @@ class LatentMetricsAggregator:
 
         ax.set_xlabel("Action", fontsize=12)
         ax.set_ylabel("Action", fontsize=12)
-        ax.set_title("Action–Action Code Usage Overlap (Jaccard Similarity)", fontsize=14, pad=12)
+        ax.set_title("Action–Action Code Usage Overlap", fontsize=14, pad=12)
 
         cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
         cbar.set_label("Similarity", fontsize=11)
 
         fig.tight_layout()
         return fig
-
-
     
     def _compute_umap_double(
         self,
@@ -929,7 +927,7 @@ class LatentMetricsAggregator:
         import matplotlib.pyplot as plt
         import umap
 
-        # Modern scientific style
+        # Style
         plt.style.use("seaborn-v0_8-whitegrid")
 
         reducer = umap.UMAP(
@@ -942,13 +940,14 @@ class LatentMetricsAggregator:
         emb_a = reducer.fit_transform(z_a_s)
         emb_q = reducer.fit_transform(z_q_s)
 
-        # Better colormap with 20 distinct high-quality colors
+        # Distinct color map
         cmap = plt.get_cmap("tab20")
 
         def nice_umap(emb, title):
-            fig, ax = plt.subplots(figsize=(6.5, 5.5))
+            # High DPI + frame
+            fig, ax = plt.subplots(figsize=(6.5, 5.5), dpi=250)
 
-            ax.scatter(
+            sc = ax.scatter(
                 emb[:, 0],
                 emb[:, 1],
                 c=labels,
@@ -960,14 +959,17 @@ class LatentMetricsAggregator:
             )
 
             ax.set_title(title, fontsize=14, pad=10)
+
+            # No ticks / labels, just the embedding
             ax.set_xticks([])
             ax.set_yticks([])
             ax.set_xlabel("")
             ax.set_ylabel("")
-            ax.spines["top"].set_visible(False)
-            ax.spines["right"].set_visible(False)
-            ax.spines["left"].set_visible(False)
-            ax.spines["bottom"].set_visible(False)
+
+            # Make sure the frame (all spines) is visible and clean
+            for spine in ax.spines.values():
+                spine.set_visible(True)
+                spine.set_linewidth(1.0)
 
             fig.tight_layout()
             return fig
@@ -977,76 +979,72 @@ class LatentMetricsAggregator:
 
         return fig_a, fig_q
 
-    def _build_confusion_heatmap(
-        self, codes: np.ndarray, labels: np.ndarray
-    ) -> Optional["matplotlib.figure.Figure"]:
 
-        try:
-            import matplotlib.pyplot as plt
-        except Exception:
-            return None
-        
+    def _build_confusion_heatmap(self, codes: np.ndarray, labels: np.ndarray):
+        import matplotlib.pyplot as plt
+
         if codes.size == 0 or labels.size == 0:
             return None
 
-        num_actions = int(labels.max()) + 1
+        # ----------------------------------------
+        # FIXED ACTION RANGE: always 9 actions (0..8)
+        # ----------------------------------------
+        num_actions = 9
         num_codes = self.config.num_codes
 
-        # Build confusion matrix
+        # Build confusion matrix (codes × actions)
         confusion = np.zeros((num_codes, num_actions), dtype=float)
 
         for code, label in zip(codes.tolist(), labels.tolist()):
             if 0 <= code < num_codes and 0 <= label < num_actions:
                 confusion[code, label] += 1
 
-        
-
-        # Modern clean look
+        # ----------------------------------------
+        # Plotting (high DPI + frame-colored grid)
+        # ----------------------------------------
         plt.style.use("seaborn-v0_8-white")
+        fig, ax = plt.subplots(figsize=(7.5, 6), dpi=250)
 
-        fig, ax = plt.subplots(figsize=(7.5, 6))
-
-        # Single-hue clean red heatmap
         im = ax.imshow(confusion, cmap="Reds", aspect="auto")
 
-        # Grid lines
-        ax.set_xticks(np.arange(num_actions), minor=False)
-        ax.set_yticks(np.arange(num_codes), minor=False)
-
+        # Ticks
+        ax.set_xticks(np.arange(num_actions))
+        ax.set_yticks(np.arange(num_codes))
         ax.set_xticklabels([str(i) for i in range(num_actions)])
         ax.set_yticklabels([str(i) for i in range(num_codes)])
-
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
-        # Add grid (drawn *over* heatmap)
-        ax.set_xticks(np.arange(-.5, num_actions, 1), minor=True)
-        ax.set_yticks(np.arange(-.5, num_codes, 1), minor=True)
-        ax.grid(which="minor", color="white", linestyle="-", linewidth=1)
+        # Use frame (spine) color for grid
+        spine_color = ax.spines["left"].get_edgecolor()
+
+        # Grid on top of the heatmap
+        ax.set_xticks(np.arange(-0.5, num_actions, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, num_codes, 1), minor=True)
+        ax.grid(which="minor", color=spine_color, linestyle="-", linewidth=1)
         ax.tick_params(which="minor", bottom=False, left=False)
 
-        # Add numeric counts inside cells
+        # Annotate counts
         max_val = confusion.max() if confusion.max() > 0 else 1
+        threshold = 0.6 * max_val
+
         for i in range(num_codes):
             for j in range(num_actions):
                 val = int(confusion[i, j])
-                color = "black" if confusion[i, j] < max_val * 0.6 else "white"
-                ax.text(
-                    j, i,
-                    str(val),
-                    ha="center", va="center",
-                    color=color, fontsize=9
-                )
+                color = "white" if confusion[i, j] > threshold else "black"
+                ax.text(j, i, str(val), ha="center", va="center", fontsize=9, color=color)
 
-        ax.set_xlabel("Primitive Action", fontsize=12)
+        # Labels
+        ax.set_xlabel("Finegrained Action", fontsize=12)
         ax.set_ylabel("Code Index", fontsize=12)
         ax.set_title("Code–Action Confusion Matrix", fontsize=14, pad=12)
 
-        # Modern compact colorbar
+        # Colorbar
         cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
         cbar.set_label("Count", fontsize=11)
 
         fig.tight_layout()
         return fig
+
 
 
 
