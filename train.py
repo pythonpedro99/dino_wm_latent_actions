@@ -390,6 +390,7 @@ class Trainer:
         )
         self.model.latent_action_down = self.model.latent_action_down.to(self.device)
         self.model.latent_action_up = self.model.latent_action_up.to(self.device)
+        self.model.latent_action_norm = self.model.latent_action_norm.to(self.device)
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(
