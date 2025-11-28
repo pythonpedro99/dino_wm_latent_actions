@@ -320,6 +320,7 @@ class LatentMetricsAggregator:
         # full training histories per decoder
         self.decoder_histories: Dict[str, Dict[str, List[float]]] = {}
         self.num_splits = config.num_splits
+        self.config.num_codes = config.num_codes
 
         self.action_lookup: Dict[Tuple[float, ...], int] = {}
         self.reset()
@@ -454,16 +455,19 @@ class LatentMetricsAggregator:
         return pred_split.reshape(-1, self.num_splits, pred_split.shape[1]).reshape(
             -1, pred_split.shape[1] * self.num_splits
         )
-    def plot_confusion_heatmap(self, confusion: np.ndarray, title: str = "Confusion Matrix"):
+    def plot_confusion_heatmap(self, confusion: np.ndarray, title: str = "Confusion Matrix", dpi: int = 250):
         import matplotlib.pyplot as plt
-        import numpy as np
+        
 
         num_classes = confusion.shape[0]
 
         plt.style.use("seaborn-v0_8-white")
-        fig, ax = plt.subplots(figsize=(7.5, 6))
+        fig, ax = plt.subplots(figsize=(7.5, 6), dpi=dpi)
 
         im = ax.imshow(confusion, cmap="Reds", aspect="auto")
+
+        # Extract frame color for consistent grid appearance
+        spine_color = ax.spines["left"].get_edgecolor()
 
         # ticks
         ax.set_xticks(np.arange(num_classes))
@@ -472,13 +476,13 @@ class LatentMetricsAggregator:
         ax.set_yticklabels([str(i) for i in range(num_classes)])
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
-        # grid
+        # grid using the spine color
         ax.set_xticks(np.arange(-0.5, num_classes, 1), minor=True)
         ax.set_yticks(np.arange(-0.5, num_classes, 1), minor=True)
-        ax.grid(which="minor", color="white", linestyle="-", linewidth=1)
+        ax.grid(which="minor", color=spine_color, linestyle="-", linewidth=1)
         ax.tick_params(which="minor", bottom=False, left=False)
 
-        # annotate
+        # annotations
         max_val = confusion.max() if confusion.max() > 0 else 1
         for i in range(num_classes):
             for j in range(num_classes):
@@ -497,48 +501,38 @@ class LatentMetricsAggregator:
         return fig
 
 
-    def plot_per_action_accuracy(self, per_acc: np.ndarray, title="Per-Action Accuracy"):
+
+    def plot_per_action_accuracy(self, per_acc: np.ndarray, title="Per-Action Recall"):
         import matplotlib.pyplot as plt
-        import numpy as np
 
         C = len(per_acc)
-        acc_matrix = np.zeros((C, C))
-        for i in range(C):
-            acc_matrix[i, i] = per_acc[i]
 
-        plt.style.use("seaborn-v0_8-white")
-        fig, ax = plt.subplots(figsize=(7.5, 6))
+        fig, ax = plt.subplots(figsize=(9, 5), dpi=200)
 
-        im = ax.imshow(acc_matrix, cmap="Reds", vmin=0, vmax=1, aspect="equal")
+        x = np.arange(C)
 
-        # ticks
-        ax.set_xticks(np.arange(C))
-        ax.set_yticks(np.arange(C))
-        ax.set_xticklabels([str(i) for i in range(C)])
-        ax.set_yticklabels([str(i) for i in range(C)])
-        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+        # grey bar for NaN (missing actions), blue for valid values
+        colors = ["#aaaaaa" if np.isnan(a) else "#1f77b4" for a in per_acc]
 
-        # cell grid
-        ax.set_xticks(np.arange(-0.5, C, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, C, 1), minor=True)
-        ax.grid(which="minor", color="white", linestyle="-", linewidth=1)
-        ax.tick_params(which="minor", bottom=False, left=False)
+        ax.bar(x, np.nan_to_num(per_acc, nan=0.0), color=colors)
 
-        # annotate
-        for i in range(C):
-            val = per_acc[i]
-            color = "black" if val < 0.6 else "white"
-            ax.text(i, i, f"{val:.2f}", ha="center", va="center", fontsize=9, color=color)
+        # axis labels
+        ax.set_xticks(x)
+        ax.set_xticklabels([str(i) for i in range(C)], rotation=45, ha="right")
 
+        ax.set_ylabel("Recall", fontsize=12)
         ax.set_xlabel("Action", fontsize=12)
-        ax.set_ylabel("Action", fontsize=12)
         ax.set_title(title, fontsize=14, pad=12)
 
-        cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
-        cbar.set_label("Accuracy", fontsize=11)
+        # annotate bars
+        for i, val in enumerate(per_acc):
+            label = "NaN" if np.isnan(val) else f"{val:.2f}"
+            ax.text(i, (0 if np.isnan(val) else val) + 0.02,
+                    label, ha="center", va="bottom", fontsize=9)
 
         fig.tight_layout()
         return fig
+
 
     def _compute_confusion_matrix(
         self, true_labels: np.ndarray, pred_labels: np.ndarray
@@ -578,18 +572,16 @@ class LatentMetricsAggregator:
         )
         return float(np.mean(f1))
 
-    def _compute_per_action_accuracy(self, confusion: np.ndarray) -> Tuple[np.ndarray, float]:
-        total = confusion.sum()
-        if total == 0:
-            return np.zeros(confusion.shape[0], dtype=float), float("nan")
-
+    def compute_per_action_recall(confusion: np.ndarray):
+        """
+        Returns per-action recall with NaN for classes that never appear.
+        """
         tp = np.diag(confusion).astype(float)
-        fp = confusion.sum(axis=0) - tp
         fn = confusion.sum(axis=1) - tp
-        tn = total - (tp + fp + fn)
+        denom = tp + fn
 
-        per_class = (tp + tn) / total
-        return per_class, float(np.mean(per_class))
+        recall = np.divide(tp, denom, out=np.full_like(tp, np.nan, dtype=float), where=(denom > 0))
+        return recall, np.nanmean(recall)
 
     def _compute_split_decoder_classification_metrics(
         self, z_q: np.ndarray, actions: np.ndarray
@@ -611,9 +603,9 @@ class LatentMetricsAggregator:
         macro_f1 = self._compute_macro_f1(confusion)
 
         # FIGURES
-        confusion_fig = self.plot_confusion_heatmap(confusion, "Split z_q Confusion Matrix")
+        confusion_fig = self.plot_confusion_heatmap(confusion, "Decoder: Codes Action Confusion Matrix")
         per_action_acc, _ = self._compute_per_action_accuracy(confusion)
-        per_action_acc_fig = self.plot_per_action_accuracy(per_action_acc, "Split z_q Per-Action Accuracy")
+        per_action_acc_fig = self.plot_per_action_accuracy(per_action_acc, "Decoder: Codes Action Accuracy")
 
         return {
             "z_q_split_macro_f1": macro_f1,
@@ -842,71 +834,57 @@ class LatentMetricsAggregator:
 
 
     def _compute_action_action_overlap(self, codes: np.ndarray, labels: np.ndarray):
-        """
-        Computes an action–action Jaccard similarity heatmap.
-        Returns the matplotlib Figure.
-        """
-        try:
-            import matplotlib.pyplot as plt
-            import numpy as np
-            from collections import defaultdict
-        except Exception:
-            return None
+        import matplotlib.pyplot as plt
+        from collections import defaultdict
 
         if codes.size == 0 or labels.size == 0:
             return None
 
-        # Collect codes used per action
+        # Collect codes per action
         per_action_codes = defaultdict(set)
         for code, label in zip(codes.tolist(), labels.tolist()):
             per_action_codes[int(label)].add(int(code))
 
-        # Sorted list of actions
-        actions = sorted(per_action_codes.keys())
+        # --- FIX: Always use 9 actions (0–8) ---
+        actions = list(range(9))  # <-- ONLY CHANGE
         A = len(actions)
 
-        # Build Jaccard similarity matrix
+        # Build Jaccard matrix
         overlap_matrix = np.zeros((A, A), dtype=float)
         for i, ai in enumerate(actions):
-            Ci = per_action_codes[ai]
+            Ci = per_action_codes.get(ai, set())
             for j, aj in enumerate(actions):
-                Cj = per_action_codes[aj]
+                Cj = per_action_codes.get(aj, set())
                 union = len(Ci | Cj)
                 inter = len(Ci & Cj)
                 overlap_matrix[i, j] = (inter / union) if union > 0 else 0.0
 
-        # --- Create a modern, clean heatmap ---
+        # Plotting
         plt.style.use("seaborn-v0_8-white")
+        fig, ax = plt.subplots(figsize=(7.5, 6), dpi=250)
 
-        fig, ax = plt.subplots(figsize=(7.5, 6))
-
-        # Use a clean single-hue colormap (light→dark red)
         im = ax.imshow(overlap_matrix, cmap="Reds", vmin=0, vmax=1, aspect="auto")
 
-        # Ticks
         ax.set_xticks(np.arange(A))
         ax.set_yticks(np.arange(A))
         ax.set_xticklabels(actions)
         ax.set_yticklabels(actions)
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
-        # Light grid lines (minor ticks)
+        # Use spine color for grid
+        spine_color = ax.spines["left"].get_edgecolor()
+
         ax.set_xticks(np.arange(-0.5, A, 1), minor=True)
         ax.set_yticks(np.arange(-0.5, A, 1), minor=True)
-        ax.grid(which="minor", color="white", linestyle="-", linewidth=1)
+        ax.grid(which="minor", color=spine_color, linestyle="-", linewidth=1)
         ax.tick_params(which="minor", bottom=False, left=False)
 
-        # Annotate each cell with similarity value
+        # annotate
         for i in range(A):
             for j in range(A):
                 val = overlap_matrix[i, j]
-                text_color = "black" if val < 0.55 else "white"
-                ax.text(
-                    j, i,
-                    f"{val:.2f}",
-                    ha="center", va="center",
-                    fontsize=9, color=text_color
-                )
+                color = "black" if val < 0.55 else "white"
+                ax.text(j, i, f"{val:.2f}", ha="center", va="center", fontsize=9, color=color)
 
         ax.set_xlabel("Action", fontsize=12)
         ax.set_ylabel("Action", fontsize=12)
@@ -917,6 +895,7 @@ class LatentMetricsAggregator:
 
         fig.tight_layout()
         return fig
+
 
     
     def _compute_umap_double(
