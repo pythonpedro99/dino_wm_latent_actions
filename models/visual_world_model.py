@@ -44,6 +44,7 @@ class VWorldModel(nn.Module):
         self.latent_vq_model = latent_vq_model
         self.latent_action_down = latent_action_down
         self.latent_action_up = latent_action_up
+        self.latent_action_norm = nn.LayerNorm(getattr(self.latent_action_down, "out_features", latent_action_dim))
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder
@@ -65,6 +66,7 @@ class VWorldModel(nn.Module):
         print(f"latent_vq_model: {self.latent_vq_model}")
         print(f"latent_action_down: {self.latent_action_down}")
         print(f"latent_action_up: {self.latent_action_up}")
+        print(f"latent_action_norm: {self.latent_action_norm}")
         print(f"latent_action_dim: {self.latent_action_dim}")
         print(f"proprio_dim: {proprio_dim}, after repeat: {self.proprio_dim}")
         print(f"action_dim: {action_dim}, after repeat: {self.action_dim}")
@@ -116,6 +118,7 @@ class VWorldModel(nn.Module):
 
         latent_actions = self.latent_action_model(z_dct["visual"])["action_patches"]
         latent_actions = self.latent_action_down(latent_actions)
+        latent_actions = self.latent_action_norm(latent_actions)
         latent_actions = torch.cat(
             [latent_actions[:, 1:, :, :], latent_actions[:, -1:, :, :]],
             dim=1
