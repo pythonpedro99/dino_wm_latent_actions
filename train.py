@@ -2,6 +2,7 @@ import os
 import time
 import math
 import hydra
+import numbers
 import torch
 import torch.nn as nn
 import wandb
@@ -753,9 +754,13 @@ class Trainer:
         ):
             latent_metrics, latent_figs = self.latent_metric_analyzer.compute()
             for key, value in latent_metrics.items():
+                if isinstance(value, (list, tuple, np.ndarray)):
+                    continue
+                if not isinstance(value, numbers.Number):
+                    continue
                 if math.isnan(value):
                     continue
-                self.logs_update({f"val_{key}": [value]})
+                self.logs_update({f"val_{key}": [float(value)]})
             if self.wandb_run is not None:
                 for fig_name, fig in latent_figs.items():
                     if fig is None:
