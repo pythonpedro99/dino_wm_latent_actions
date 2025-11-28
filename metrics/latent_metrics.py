@@ -447,6 +447,91 @@ class LatentMetricsAggregator:
         return pred_split.reshape(-1, self.num_splits, pred_split.shape[1]).reshape(
             -1, pred_split.shape[1] * self.num_splits
         )
+    def plot_confusion_heatmap(self, confusion: np.ndarray, title: str = "Confusion Matrix"):
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        num_classes = confusion.shape[0]
+
+        plt.style.use("seaborn-v0_8-white")
+        fig, ax = plt.subplots(figsize=(7.5, 6))
+
+        im = ax.imshow(confusion, cmap="Reds", aspect="auto")
+
+        # ticks
+        ax.set_xticks(np.arange(num_classes))
+        ax.set_yticks(np.arange(num_classes))
+        ax.set_xticklabels([str(i) for i in range(num_classes)])
+        ax.set_yticklabels([str(i) for i in range(num_classes)])
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+
+        # grid
+        ax.set_xticks(np.arange(-0.5, num_classes, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, num_classes, 1), minor=True)
+        ax.grid(which="minor", color="white", linestyle="-", linewidth=1)
+        ax.tick_params(which="minor", bottom=False, left=False)
+
+        # annotate
+        max_val = confusion.max() if confusion.max() > 0 else 1
+        for i in range(num_classes):
+            for j in range(num_classes):
+                val = int(confusion[i, j])
+                color = "black" if val < 0.6 * max_val else "white"
+                ax.text(j, i, str(val), ha="center", va="center", color=color, fontsize=9)
+
+        ax.set_xlabel("Predicted", fontsize=12)
+        ax.set_ylabel("True", fontsize=12)
+        ax.set_title(title, fontsize=14, pad=12)
+
+        cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
+        cbar.set_label("Count", fontsize=11)
+
+        fig.tight_layout()
+        return fig
+
+
+    def plot_per_action_accuracy(self, per_acc: np.ndarray, title="Per-Action Accuracy"):
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        C = len(per_acc)
+        acc_matrix = np.zeros((C, C))
+        for i in range(C):
+            acc_matrix[i, i] = per_acc[i]
+
+        plt.style.use("seaborn-v0_8-white")
+        fig, ax = plt.subplots(figsize=(7.5, 6))
+
+        im = ax.imshow(acc_matrix, cmap="Reds", vmin=0, vmax=1, aspect="equal")
+
+        # ticks
+        ax.set_xticks(np.arange(C))
+        ax.set_yticks(np.arange(C))
+        ax.set_xticklabels([str(i) for i in range(C)])
+        ax.set_yticklabels([str(i) for i in range(C)])
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+
+        # cell grid
+        ax.set_xticks(np.arange(-0.5, C, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, C, 1), minor=True)
+        ax.grid(which="minor", color="white", linestyle="-", linewidth=1)
+        ax.tick_params(which="minor", bottom=False, left=False)
+
+        # annotate
+        for i in range(C):
+            val = per_acc[i]
+            color = "black" if val < 0.6 else "white"
+            ax.text(i, i, f"{val:.2f}", ha="center", va="center", fontsize=9, color=color)
+
+        ax.set_xlabel("Action", fontsize=12)
+        ax.set_ylabel("Action", fontsize=12)
+        ax.set_title(title, fontsize=14, pad=12)
+
+        cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
+        cbar.set_label("Accuracy", fontsize=11)
+
+        fig.tight_layout()
+        return fig
 
     def _compute_confusion_matrix(
         self, true_labels: np.ndarray, pred_labels: np.ndarray
@@ -512,17 +597,24 @@ class LatentMetricsAggregator:
         true_labels = self._actions_to_labels(actions).reshape(-1)
         pred_labels = self._actions_to_labels(pred_actions).reshape(-1)
 
-        confusion, normalized = self._compute_confusion_matrix(true_labels, pred_labels)
+        # compute confusion
+        confusion, _ = self._compute_confusion_matrix(true_labels, pred_labels)
+
+        # compute summary metric
         macro_f1 = self._compute_macro_f1(confusion)
-        per_action_acc, macro_acc = self._compute_per_action_accuracy(confusion)
+
+        # FIGURES
+        confusion_fig = self.plot_confusion_heatmap(confusion, "Split z_q Confusion Matrix")
+        per_action_acc, _ = self._compute_per_action_accuracy(confusion)
+        per_action_acc_fig = self.plot_per_action_accuracy(per_action_acc, "Split z_q Per-Action Accuracy")
 
         return {
-            "z_q_split_confusion_matrix": confusion.tolist(),
-            "z_q_split_confusion_matrix_normalized": normalized.tolist(),
             "z_q_split_macro_f1": macro_f1,
-            "z_q_split_per_action_accuracy": per_action_acc.tolist(),
-            "z_q_split_macro_accuracy": macro_acc,
+            "z_q_split_confusion_heatmap_fig": confusion_fig,
+            "z_q_split_per_action_accuracy_fig": per_action_acc_fig,
         }
+
+
 
 
     def reset(self) -> None:
@@ -744,12 +836,17 @@ class LatentMetricsAggregator:
 
     def _compute_action_action_overlap(self, codes: np.ndarray, labels: np.ndarray):
         """
-        Computes an action-action Jaccard similarity heatmap.
-        Returns only the matplotlib Figure for logging (e.g., to W&B).
+        Computes an action–action Jaccard similarity heatmap.
+        Returns the matplotlib Figure.
         """
         try:
             import matplotlib.pyplot as plt
+            import numpy as np
+            from collections import defaultdict
         except Exception:
+            return None
+
+        if codes.size == 0 or labels.size == 0:
             return None
 
         # Collect codes used per action
@@ -757,11 +854,11 @@ class LatentMetricsAggregator:
         for code, label in zip(codes.tolist(), labels.tolist()):
             per_action_codes[int(label)].add(int(code))
 
-        # Sort action identifiers for consistent ordering
+        # Sorted list of actions
         actions = sorted(per_action_codes.keys())
         A = len(actions)
 
-        # Build the action–action Jaccard similarity matrix
+        # Build Jaccard similarity matrix
         overlap_matrix = np.zeros((A, A), dtype=float)
         for i, ai in enumerate(actions):
             Ci = per_action_codes[ai]
@@ -771,58 +868,50 @@ class LatentMetricsAggregator:
                 inter = len(Ci & Cj)
                 overlap_matrix[i, j] = (inter / union) if union > 0 else 0.0
 
-        # ---- Create heatmap figure ----
-        fig, ax = plt.subplots(figsize=(6, 5))
-        im = ax.imshow(overlap_matrix, cmap="viridis", vmin=0, vmax=1)
+        # --- Create a modern, clean heatmap ---
+        plt.style.use("seaborn-v0_8-white")
 
+        fig, ax = plt.subplots(figsize=(7.5, 6))
+
+        # Use a clean single-hue colormap (light→dark red)
+        im = ax.imshow(overlap_matrix, cmap="Reds", vmin=0, vmax=1, aspect="auto")
+
+        # Ticks
         ax.set_xticks(np.arange(A))
         ax.set_yticks(np.arange(A))
         ax.set_xticklabels(actions)
         ax.set_yticklabels(actions)
         plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
 
-        ax.set_xlabel("Action")
-        ax.set_ylabel("Action")
-        ax.set_title("Action–Action Code Usage Overlap (Jaccard Similarity)")
+        # Light grid lines (minor ticks)
+        ax.set_xticks(np.arange(-0.5, A, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, A, 1), minor=True)
+        ax.grid(which="minor", color="white", linestyle="-", linewidth=1)
+        ax.tick_params(which="minor", bottom=False, left=False)
 
-        fig.colorbar(im, ax=ax, label="Similarity")
+        # Annotate each cell with similarity value
+        for i in range(A):
+            for j in range(A):
+                val = overlap_matrix[i, j]
+                text_color = "black" if val < 0.55 else "white"
+                ax.text(
+                    j, i,
+                    f"{val:.2f}",
+                    ha="center", va="center",
+                    fontsize=9, color=text_color
+                )
+
+        ax.set_xlabel("Action", fontsize=12)
+        ax.set_ylabel("Action", fontsize=12)
+        ax.set_title("Action–Action Code Usage Overlap (Jaccard Similarity)", fontsize=14, pad=12)
+
+        cbar = fig.colorbar(im, ax=ax, fraction=0.045, pad=0.03)
+        cbar.set_label("Similarity", fontsize=11)
+
         fig.tight_layout()
-
         return fig
 
-    def _compute_usage_overlap(self, codes: np.ndarray, labels: np.ndarray) -> Dict[str, float]:
-        if codes.size == 0 or labels.size == 0:
-            return {}
-
-        unique_labels = np.unique(labels.astype(int))
-        per_action_codes = {
-            int(lbl): set(codes[labels == lbl].astype(int).tolist()) for lbl in unique_labels
-        }
-
-        overlaps: List[float] = []
-        action_code_counts: List[int] = []
-
-        for i, li in enumerate(unique_labels):
-            Ci = per_action_codes[int(li)]
-            action_code_counts.append(len(Ci))
-            for lj in unique_labels[i + 1 :]:
-                Cj = per_action_codes[int(lj)]
-                union = len(Ci | Cj)
-                inter = len(Ci & Cj)
-                if union > 0:
-                    overlaps.append(inter / union)
-
-        mean_overlap = float(np.mean(overlaps)) if overlaps else float("nan")
-        mean_codes_per_action = (
-            float(np.mean(action_code_counts)) if action_code_counts else float("nan")
-        )
-
-        return {
-            "code_action_jaccard_mean": mean_overlap,
-            "codes_per_action_mean": mean_codes_per_action,
-        }
     
-
     def _compute_umap_double(
         self,
         z_a: np.ndarray,
@@ -901,9 +990,6 @@ class LatentMetricsAggregator:
         fig_q = nice_umap(emb_q, "UMAP z_q (composite)")
 
         return fig_a, fig_q
-
-
-
 
     def _build_confusion_heatmap(
         self, codes: np.ndarray, labels: np.ndarray
@@ -1056,29 +1142,40 @@ class LatentMetricsAggregator:
             primitive_labels.reshape(-1) if primitive_labels.size > 0 else primitive_labels
         )
 
-        # Code–primitive-action confusion heatmap
+        # --- Code–primitive-action confusion heatmap ---
         confusion_fig = self._build_confusion_heatmap(codes, primitive_labels_flat)
         if confusion_fig is not None:
-            figures["code_action_confusion"] = confusion_fig
+            figures["code_primitive_action_confusion"] = confusion_fig
 
-        # Code–primitive-action usage overlap
-        metrics.update(self._compute_usage_overlap(codes, primitive_labels_flat))
+        # --- Primitive-action ↔ primitive-action overlap (Jaccard) ---
+        overlap_fig = self._compute_action_action_overlap(codes, primitive_labels_flat)
+        if overlap_fig is not None:
+            figures["primitive_action_overlap"] = overlap_fig
 
-        # --- UMAP triplet: composite + primitive labels ---
-        fig_a, fig_q = self._compute_umap_triplet(
-            z_a, z_q, composite_labels, primitive_labels
-        )
-        if fig_a is not None:
-            figures["umap_z_a"] = fig_a
-        if fig_q is not None:
-            figures["umap_z_q"] = fig_q
+        # --- UMAP : composite labels only (z_a and z_q) ---
+        umap_fig_a, umap_fig_q = self._compute_umap_double(z_a, z_q, composite_labels)
+        if umap_fig_a is not None:
+            figures["umap_z_a"] = umap_fig_a
+        if umap_fig_q is not None:
+            figures["umap_z_q"] = umap_fig_q
 
         # --- Train latent->action decoders on accumulated data ---
         decoder_metrics = self._train_action_decoders(z_a, z_q, actions)
         metrics.update(decoder_metrics)
 
-        # --- Split decoder classification metrics: uses primitive labels derived on the fly ---
-        metrics.update(self._compute_split_decoder_classification_metrics(z_q, actions))
+        # --- Split decoder classification metrics (returns macroF1 and 2 figures) ---
+        split_metrics = self._compute_split_decoder_classification_metrics(z_q, actions)
+
+        # Inject split-decoder figures into figures dict
+        if "z_q_split_confusion_heatmap_fig" in split_metrics:
+            figures["z_q_split_confusion_heatmap"] = split_metrics.pop("z_q_split_confusion_heatmap_fig")
+
+        if "z_q_split_per_action_accuracy_fig" in split_metrics:
+            figures["z_q_split_per_action_accuracy"] = split_metrics.pop("z_q_split_per_action_accuracy_fig")
+
+        # Keep macroF1 in metrics
+        metrics.update(split_metrics)
 
         return metrics, figures
+
 
