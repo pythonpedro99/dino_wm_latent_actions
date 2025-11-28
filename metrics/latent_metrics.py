@@ -659,14 +659,26 @@ class LatentMetricsAggregator:
                 .numpy()
             )
             codes = code_indices[:, :valid_steps]   # (B, valid_steps, self.num_splits)
-            
+
             # Sanity checks for num_splits consistency
-            assert codes.shape[-1] == self.num_splits, (
-                f"code_indices last dim {codes.shape[-1]} != num_splits {self.num_splits}"
-            )
-            assert act_curr.shape[1] == 2 * self.num_splits, (
-                f"actions dim {act_curr.shape[1]} != 2 * num_splits {2 * self.num_splits}"
-            )
+            if codes.shape[-1] != self.num_splits:
+                raise ValueError(
+                    "[LatentMetricsAggregator.update] "
+                    f"code_indices.shape={code_indices.shape}, "
+                    f"codes.shape={codes.shape}, "
+                    f"num_splits={self.num_splits}"
+                )
+
+            expected_action_dim = 2 * self.num_splits
+            if act_curr.shape[1] != expected_action_dim:
+                raise ValueError(
+                    "[LatentMetricsAggregator.update] "
+                    f"actions (torch) shape={actions.shape}, "
+                    f"act_curr (np) shape={act_curr.shape}, "
+                    f"num_splits={self.num_splits}, "
+                    f"expected_action_dim={expected_action_dim}"
+                )
+
                           
             labels = self._actions_to_labels(act_curr)           # (M, self.num_splits)
             composite_labels = self._collapse_labels(labels)
