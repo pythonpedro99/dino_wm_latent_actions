@@ -583,7 +583,7 @@ class LatentMetricsAggregator:
         )
         return float(np.mean(f1))
 
-    def compute_per_action_recall(confusion: np.ndarray):
+    def compute_per_action_recall(self, confusion: np.ndarray):
         """
         Returns per-action recall with NaN for classes that never appear.
         """
@@ -615,7 +615,7 @@ class LatentMetricsAggregator:
 
         # FIGURES
         confusion_fig = self.plot_confusion_heatmap(confusion, "Decoder: Codes Action Confusion Matrix")
-        per_action_acc, _ = self._compute_per_action_recall(confusion)
+        per_action_acc, _ = self.compute_per_action_recall(confusion)
         per_action_acc_fig = self.plot_per_action_accuracy(per_action_acc, "Decoder: Codes Action Accuracy")
 
         return {
