@@ -86,9 +86,29 @@ class VectorQuantizerEMA(nn.Module):
                 )
 
                 n = self.cluster_size.sum()
-                cluster_size = (self.cluster_size + 1e-6) / (n + self.num_codes * 1e-6)
+                # Convert the normalized cluster_size back to a count scale.
+                # Without the multiplicative ``* n`` term the denominator becomes
+                # a probability, causing the division below to amplify the
+                # embeddings by roughly the batch size and quickly blow up the
+                # codebook (and the commitment loss).
+                cluster_size = (
+                    (self.cluster_size + 1e-6)
+                    / (n + self.num_codes * 1e-6)
+                    * n
+                )
                 # Broadcast-normalize per code to produce the updated codebook
                 embed_normalized = self.embedding_avg / cluster_size.unsqueeze(1)
+
+                # Revive codes that have effectively disappeared (cluster_size ~ 0)
+                # by reseeding them from current encoder outputs. Without this,
+                # a single code can monopolize assignments and the rest decay to
+                # zero, collapsing the codebook and inflating commitment loss.
+                dead_mask = cluster_size < 1e-3
+                if dead_mask.any() and flat.numel() > 0:
+                    num_dead = dead_mask.sum().item()
+                    rand_src = torch.randint(0, flat.size(0), (num_dead,), device=z.device)
+                    embed_normalized[dead_mask] = flat[rand_src]
+
                 self.embedding.data.copy_(embed_normalized)
 
         # Commitment loss
