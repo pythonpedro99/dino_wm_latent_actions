@@ -1002,6 +1002,11 @@ class LatentMetricsAggregator:
         self, codes: np.ndarray, labels: np.ndarray
     ) -> Optional["matplotlib.figure.Figure"]:
 
+        try:
+            import matplotlib.pyplot as plt
+        except Exception:
+            return None
+        
         if codes.size == 0 or labels.size == 0:
             return None
 
@@ -1015,11 +1020,7 @@ class LatentMetricsAggregator:
             if 0 <= code < num_codes and 0 <= label < num_actions:
                 confusion[code, label] += 1
 
-        try:
-            import matplotlib.pyplot as plt
-            import numpy as np
-        except Exception:
-            return None
+        
 
         # Modern clean look
         plt.style.use("seaborn-v0_8-white")
