@@ -823,55 +823,37 @@ class LatentMetricsAggregator:
         }
     
 
-    def _compute_umap_triplet(
+    def _compute_umap_double(
         self,
         z_a: np.ndarray,
         z_q: np.ndarray,
         composite_labels: np.ndarray,
-        primitive_labels: np.ndarray,
     ) -> Tuple[
-        Optional["matplotlib.figure.Figure"],
         Optional["matplotlib.figure.Figure"],
         Optional["matplotlib.figure.Figure"],
     ]:
         """
-        Build three UMAP plots:
+        Build two UMAP plots:
         - z_a colored by composite action labels
         - z_q colored by composite action labels
-        - z_q split chunks colored by primitive labels
         """
+        # Sanity checks
         if (
             z_a.size == 0
             or z_q.size == 0
             or composite_labels.size == 0
-            or primitive_labels.size == 0
         ):
-            return None, None, None
+            return None, None
 
         assert composite_labels.ndim == 1, (
             f"composite_labels must be (N,), got {composite_labels.shape}"
-        )
-        assert primitive_labels.ndim == 2, (
-            f"primitive_labels must be (N, num_splits), got {primitive_labels.shape}"
         )
 
         N_full = composite_labels.shape[0]
         assert z_a.shape[0] == N_full, "z_a rows must match number of action stacks"
         assert z_q.shape[0] == N_full, "z_q rows must match number of action stacks"
-        assert primitive_labels.shape[0] == N_full, (
-            "primitive_labels first dim must match number of action stacks"
-        )
-        num_splits = primitive_labels.shape[1]
-        assert z_q.shape[1] % num_splits == 0, (
-            f"z_q dim {z_q.shape[1]} must be divisible by num_splits={num_splits}"
-        )
 
-
-        
-        assert num_splits == self.num_splits, (
-            f"primitive_labels second dim {num_splits} != num_splits {self.num_splits}"
-        )
-
+        # Subsample to limit computation
         N = min(N_full, self.config.umap_points)
         if N_full <= N:
             idx = np.arange(N_full)
@@ -880,28 +862,22 @@ class LatentMetricsAggregator:
 
         z_a_s = z_a[idx]
         z_q_s = z_q[idx]
-        lbl_comp_s = composite_labels[idx]          # (N,)
-        lbl_prim_s = primitive_labels[idx]          # (N, num_splits)
+        lbl_comp_s = composite_labels[idx]   # (N,)
 
-        # Standardize
+        # Standardize before UMAP
         scaler_a = StandardScaler().fit(z_a_s)
         z_a_s = scaler_a.transform(z_a_s)
 
         scaler_q = StandardScaler().fit(z_q_s)
         z_q_s = scaler_q.transform(z_q_s)
 
-        chunk_dim = z_q.shape[1] // num_splits
-        z_q_split = z_q_s.reshape(N, num_splits, chunk_dim).reshape(
-            N * num_splits, chunk_dim
-        )
-        lbl_split = lbl_prim_s.reshape(-1)          # (N * num_splits,)
-
         try:
             import matplotlib.pyplot as plt
             import umap
         except Exception:
-            return None, None, None
+            return None, None
 
+        # UMAP reducer
         reducer = umap.UMAP(
             n_neighbors=self.config.umap_neighbors,
             min_dist=self.config.umap_min_dist,
@@ -911,38 +887,35 @@ class LatentMetricsAggregator:
 
         emb_a = reducer.fit_transform(z_a_s)
         emb_q = reducer.fit_transform(z_q_s)
-        emb_q_split = reducer.fit_transform(z_q_split)
 
+        # ------------------------------
+        # Plot z_a (composite)
+        # ------------------------------
         fig_a, ax = plt.subplots(figsize=(6, 5))
         sc = ax.scatter(
-            emb_a[:, 0], emb_a[:, 1], c=lbl_comp_s, cmap="tab10", s=6, alpha=0.8
+            emb_a[:, 0], emb_a[:, 1],
+            c=lbl_comp_s, cmap="tab10",
+            s=6, alpha=0.8,
         )
         ax.set_title("UMAP z_a (composite)")
-        fig_a.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        #fig_a.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
         fig_a.tight_layout()
 
+        # ------------------------------
+        # Plot z_q (composite)
+        # ------------------------------
         fig_q, ax = plt.subplots(figsize=(6, 5))
         sc = ax.scatter(
-            emb_q[:, 0], emb_q[:, 1], c=lbl_comp_s, cmap="tab10", s=6, alpha=0.8
+            emb_q[:, 0], emb_q[:, 1],
+            c=lbl_comp_s, cmap="tab10",
+            s=6, alpha=0.8,
         )
         ax.set_title("UMAP z_q (composite)")
-        fig_q.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        #fig_q.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
         fig_q.tight_layout()
 
-        fig_qs, ax = plt.subplots(figsize=(6, 5))
-        sc = ax.scatter(
-            emb_q_split[:, 0],
-            emb_q_split[:, 1],
-            c=lbl_split,
-            cmap="tab10",
-            s=6,
-            alpha=0.8,
-        )
-        ax.set_title("UMAP z_q split (primitive)")
-        fig_qs.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
-        fig_qs.tight_layout()
+        return fig_a, fig_q
 
-        return fig_a, fig_q, fig_qs
 
 
     def _build_confusion_heatmap(
@@ -1074,15 +1047,13 @@ class LatentMetricsAggregator:
         metrics.update(self._compute_usage_overlap(codes, primitive_labels_flat))
 
         # --- UMAP triplet: composite + primitive labels ---
-        fig_a, fig_q, fig_qs = self._compute_umap_triplet(
+        fig_a, fig_q = self._compute_umap_triplet(
             z_a, z_q, composite_labels, primitive_labels
         )
         if fig_a is not None:
             figures["umap_z_a"] = fig_a
         if fig_q is not None:
             figures["umap_z_q"] = fig_q
-        if fig_qs is not None:
-            figures["umap_z_q_split"] = fig_qs
 
         # --- Train latent->action decoders on accumulated data ---
         decoder_metrics = self._train_action_decoders(z_a, z_q, actions)
