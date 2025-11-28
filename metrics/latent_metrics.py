@@ -615,7 +615,7 @@ class LatentMetricsAggregator:
 
         # FIGURES
         confusion_fig = self.plot_confusion_heatmap(confusion, "Decoder: Codes Action Confusion Matrix")
-        per_action_acc, _ = self._compute_per_action_accuracy(confusion)
+        per_action_acc, _ = self._compute_per_action_recall(confusion)
         per_action_acc_fig = self.plot_per_action_accuracy(per_action_acc, "Decoder: Codes Action Accuracy")
 
         return {
