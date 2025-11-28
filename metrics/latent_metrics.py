@@ -168,37 +168,48 @@ def _digamma_vector(values: np.ndarray) -> np.ndarray:
     return torch.digamma(tensor).cpu().numpy()
 
 
-def knn_mutual_information(x: np.ndarray, y: np.ndarray, k: int, rng: np.random.Generator) -> float:
+def knn_mutual_information(
+    x: np.ndarray,
+    y: np.ndarray,
+    k: int,
+    rng: np.random.Generator,
+) -> float:
     n = min(x.shape[0], y.shape[0])
-    if n == 0:
+    if n == 0 or n <= k:
         return float("nan")
-    if n <= k:
-        return float("nan")
+
     x = x[:n]
     y = y[:n]
+
+    # Optional subsampling for large n
     if n > 10000:
         indices = rng.permutation(n)[:10000]
         x = x[indices]
         y = y[indices]
+        n = x.shape[0]  # <-- important
 
     xy = np.concatenate([x, y], axis=1)
+
     dist_xy = _pairwise_chebyshev(xy)
     np.fill_diagonal(dist_xy, np.inf)
-    kth = np.partition(dist_xy, kth=k - 1, axis=1)[:, k - 1]
-    kth = kth + 1e-10
+    kth = np.partition(dist_xy, kth=k - 1, axis=1)[:, k - 1] + 1e-10
 
     dist_x = _pairwise_chebyshev(x)
     dist_y = _pairwise_chebyshev(y)
-
     np.fill_diagonal(dist_x, np.inf)
     np.fill_diagonal(dist_y, np.inf)
 
+    # Count neighbors within joint-radius in the marginals
     nx = (dist_x < kth[:, None]).sum(axis=1)
     ny = (dist_y < kth[:, None]).sum(axis=1)
-    nx = np.maximum(nx, 0)
-    ny = np.maximum(ny, 0)
 
-    return _digamma(k) + _digamma(n) - float(np.mean(_digamma_vector(nx + 1) + _digamma_vector(ny + 1)))
+    # Kraskov-like estimator
+    return (
+        _digamma(k)
+        + _digamma(n)
+        - float(np.mean(_digamma_vector(nx + 1) + _digamma_vector(ny + 1)))
+    )
+
 
 
 def knn_consistency(
