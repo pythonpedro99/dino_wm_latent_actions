@@ -19,7 +19,7 @@ class LatentToActionDecoder(torch.nn.Module):
         input_dim: int,
         action_dim: int,
         hidden_dim: int = 256,
-        batch_size: int = 512,
+        batch_size: int = 64,
         num_epochs: int = 10,
         lr: float = 1e-3,
         weight_decay: float = 0.0,
@@ -849,13 +849,13 @@ class LatentMetricsAggregator:
         assert primitive_labels.shape[0] == N_full, (
             "primitive_labels first dim must match number of action stacks"
         )
-        
+        num_splits = primitive_labels.shape[1]
         assert z_q.shape[1] % num_splits == 0, (
             f"z_q dim {z_q.shape[1]} must be divisible by num_splits={num_splits}"
         )
 
 
-        num_splits = primitive_labels.shape[1]
+        
         assert num_splits == self.num_splits, (
             f"primitive_labels second dim {num_splits} != num_splits {self.num_splits}"
         )
