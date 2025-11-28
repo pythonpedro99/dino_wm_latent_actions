@@ -33,7 +33,7 @@ hydra:
 
 training:
   seed: 0
-  epochs: 1
+  epochs: 5
   batch_size: 14 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
@@ -51,7 +51,7 @@ concat_dim: 1 # change to 0 for concat along token dim, 1 for feature dim
 normalize_action: True
 
 # action encoder
-action_emb_dim: 20 
+action_emb_dim: 10 
 num_action_repeat: 1
 
 # proprio encoder
@@ -75,7 +75,7 @@ model:
   # while using a single shared embedding table.
   codebook_splits: 5
   codebook_dim: 4
-  latent_action_dim: 20
+  latent_action_dim: 10
   commitment: 0.25
   ema_decay: 0.99
 
