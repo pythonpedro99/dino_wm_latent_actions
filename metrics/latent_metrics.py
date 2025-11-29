@@ -938,17 +938,17 @@ class LatentMetricsAggregator:
         z_a: np.ndarray,
         z_q: np.ndarray,
         composite_labels: np.ndarray,
+        primitive_labels: Optional[np.ndarray] = None,
     ):
         if (
             z_a.size == 0
             or z_q.size == 0
             or composite_labels.size == 0
         ):
-            return None, None
+            return None, None, None
 
         assert composite_labels.ndim == 1
 
-        # Subsample
         N_full = z_a.shape[0]
         N = min(N_full, self.config.umap_points)
         idx = (
@@ -957,64 +957,103 @@ class LatentMetricsAggregator:
             else self.rng.permutation(N_full)[:N]
         )
 
+        from sklearn.preprocessing import StandardScaler
+        import matplotlib.pyplot as plt
+        import umap
+        import numpy as np
+
         z_a_s = StandardScaler().fit_transform(z_a[idx])
         z_q_s = StandardScaler().fit_transform(z_q[idx])
         labels = composite_labels[idx]
 
-        import matplotlib.pyplot as plt
-        import umap
-
-        # Style
         plt.style.use("seaborn-v0_8-whitegrid")
 
-        reducer = umap.UMAP(
-            n_neighbors=self.config.umap_neighbors,
-            min_dist=self.config.umap_min_dist,
-            random_state=self.config.seed,
-            metric="euclidean",
-        )
+        def make_reducer():
+            return umap.UMAP(
+                n_neighbors=self.config.umap_neighbors,
+                min_dist=self.config.umap_min_dist,
+                random_state=self.config.seed,
+                metric="euclidean",
+            )
 
-        emb_a = reducer.fit_transform(z_a_s)
-        emb_q = reducer.fit_transform(z_q_s)
+        reducer_a = make_reducer()
+        reducer_q = make_reducer()
 
-        # Distinct color map
+        emb_a = reducer_a.fit_transform(z_a_s)
+        emb_q = reducer_q.fit_transform(z_q_s)
+
         cmap = plt.get_cmap("tab20")
 
-        def nice_umap(emb, title):
-            # High DPI + frame
+        def nice_umap(emb: np.ndarray, labels_local: np.ndarray, title: str):
             fig, ax = plt.subplots(figsize=(6.5, 5.5), dpi=250)
-
-            sc = ax.scatter(
+            ax.scatter(
                 emb[:, 0],
                 emb[:, 1],
-                c=labels,
+                c=labels_local,
                 cmap=cmap,
                 s=12,
                 alpha=0.7,
                 linewidth=0,
                 edgecolors="none",
             )
-
             ax.set_title(title, fontsize=14, pad=10)
-
-            # No ticks / labels, just the embedding
             ax.set_xticks([])
             ax.set_yticks([])
             ax.set_xlabel("")
             ax.set_ylabel("")
-
-            # Make sure the frame (all spines) is visible and clean
             for spine in ax.spines.values():
                 spine.set_visible(True)
                 spine.set_linewidth(1.0)
-
             fig.tight_layout()
             return fig
 
-        fig_a = nice_umap(emb_a, "UMAP z_a (composite)")
-        fig_q = nice_umap(emb_q, "UMAP z_q (composite)")
+        # Composite-label UMAPs
+        fig_a = nice_umap(emb_a, labels, "UMAP z_a (composite)")
+        fig_q = nice_umap(emb_q, labels, "UMAP z_q (composite)")
 
-        return fig_a, fig_q
+        # ----------------------------------------------------------
+        # z_a split UMAP with primitive labels (optional)
+        # ----------------------------------------------------------
+        fig_a_prim = None
+        if primitive_labels is not None:
+            primitive_labels = np.asarray(primitive_labels)
+            if (
+                primitive_labels.ndim != 2
+                or primitive_labels.shape[0] != N_full
+                or primitive_labels.shape[1] != self.num_splits
+            ):
+                raise ValueError(
+                    f"primitive_labels must have shape (N_full, num_splits) = "
+                    f"({N_full}, {self.num_splits}), got {primitive_labels.shape}"
+                )
+
+            # Subsample + flatten per split
+            prim_labels_s = primitive_labels[idx].reshape(-1)
+
+            D = z_a.shape[1]
+            if D % self.num_splits != 0:
+                raise ValueError(
+                    f"z_a dim {D} not divisible by num_splits={self.num_splits}"
+                )
+            dim_per_split = D // self.num_splits
+
+            # (N, D) -> (N, S, D/S) -> (N*S, D/S)
+            z_a_split = z_a[idx].reshape(N, self.num_splits, dim_per_split).reshape(
+                -1, dim_per_split
+            )
+            z_a_split_s = StandardScaler().fit_transform(z_a_split)
+
+            reducer_split = make_reducer()
+            emb_a_split = reducer_split.fit_transform(z_a_split_s)
+
+            fig_a_prim = nice_umap(
+                emb_a_split,
+                prim_labels_s,
+                "UMAP z_a splits (primitive)",
+            )
+
+        return fig_a, fig_q, fig_a_prim
+
 
 
     def _build_confusion_heatmap(self, codes: np.ndarray, labels: np.ndarray):
@@ -1174,12 +1213,21 @@ class LatentMetricsAggregator:
         if overlap_fig is not None:
             figures["primitive_action_overlap"] = overlap_fig
 
-        # --- UMAP : composite labels only (z_a and z_q) ---
-        umap_fig_a, umap_fig_q = self._compute_umap_double(z_a, z_q, composite_labels)
+        # --- UMAP : composite labels only (z_a and z_q) + z_a splits with primitive labels ---
+        umap_fig_a, umap_fig_q, umap_fig_a_prim = self._compute_umap_double(
+            z_a,
+            z_q,
+            composite_labels,
+            primitive_labels=primitive_labels,  # or primitive_labels
+        )
+
         if umap_fig_a is not None:
             figures["umap_z_a"] = umap_fig_a
         if umap_fig_q is not None:
             figures["umap_z_q"] = umap_fig_q
+        if umap_fig_a_prim is not None:
+            figures["umap_z_a_split_primitive"] = umap_fig_a_prim
+
 
         # --- Train latent->action decoders on accumulated data ---
         decoder_metrics = self._train_action_decoders(z_a, z_q, actions)
