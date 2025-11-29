@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+from sklearn import metrics
 import torch
 from sklearn.preprocessing import StandardScaler
 
@@ -640,50 +641,81 @@ class LatentMetricsAggregator:
         recall = np.divide(tp, denom, out=np.full_like(tp, np.nan, dtype=float), where=(denom > 0))
         return recall, np.nanmean(recall)
 
-    def _compute_split_decoder_classification_metrics(
+    def _compute_all_decoder_classification_metrics(
         self,
-        z: np.ndarray,
+        z_q: np.ndarray,
+        z_a: np.ndarray,
         actions: np.ndarray,
-        decoder,
-        prefix: str,
     ) -> Dict[str, object]:
         """
-        Compute classification metrics for a split decoder (z_q or z_a).
-
-        prefix examples:
-        - "z_q_split"
-        - "z_a_split"
+        Compute classification metrics for ALL four decoders:
+        - z_q_full
+        - z_a_full
+        - z_q_split
+        - z_a_split
+        Returns a single dictionary with all F1s, figures, accuracies.
         """
-        if z.size == 0 or actions.size == 0:
-            return {}
+        metrics = {}
 
-        pred_actions = self._predict_actions_from_split(z, decoder)
-        if pred_actions.size == 0:
-            return {}
+        if z_q.size == 0 or z_a.size == 0 or actions.size == 0:
+            return metrics
 
-        true_labels = self._actions_to_labels(actions).reshape(-1)
-        pred_labels = self._actions_to_labels(pred_actions).reshape(-1)
+        # ======== Helper: full decoder prediction ========
+        def predict_full(decoder, z):
+            z_t = torch.from_numpy(z).float().to(decoder.device)
+            with torch.no_grad():
+                return decoder(z_t).cpu().numpy()
 
-        # confusion matrix and macro-F1
-        confusion, _ = self._compute_confusion_matrix(true_labels, pred_labels)
-        macro_f1 = self._compute_macro_f1(confusion)
+        # ======== Helper: split decoder prediction ========
+        def predict_split(decoder, z):
+            return self._predict_actions_from_split(z, decoder)
 
-        # figures
-        confusion_fig = self.plot_confusion_heatmap(
-            confusion,
-            f"Decoder ({prefix}): Codes Action Confusion Matrix",
-        )
-        per_action_acc, _ = self.compute_per_action_recall(confusion)
-        per_action_acc_fig = self.plot_per_action_accuracy(
-            per_action_acc,
-            f"Decoder ({prefix}): Codes Action Accuracy",
-        )
+        # ======== Helper: compute labels & metrics ========
+        def compute_metrics(pred_actions, prefix):
+            true_labels = self._actions_to_labels(actions).reshape(-1)
+            pred_labels = self._actions_to_labels(pred_actions).reshape(-1)
 
-        return {
-            f"{prefix}_macro_f1": macro_f1,
-            f"{prefix}_confusion_heatmap_fig": confusion_fig,
-            f"{prefix}_per_action_accuracy_fig": per_action_acc_fig,
-        }
+            confusion, _ = self._compute_confusion_matrix(true_labels, pred_labels)
+            macro_f1 = self._compute_macro_f1(confusion)
+
+            confusion_fig = self.plot_confusion_heatmap(
+                confusion,
+                f"Decoder ({prefix}): Codes Action Confusion Matrix",
+            )
+            per_action_acc, _ = self.compute_per_action_recall(confusion)
+            per_action_acc_fig = self.plot_per_action_accuracy(
+                per_action_acc,
+                f"Decoder ({prefix}): Codes Action Accuracy",
+            )
+
+            return {
+                f"{prefix}_macro_f1": macro_f1,
+                f"{prefix}_confusion_heatmap_fig": confusion_fig,
+                f"{prefix}_per_action_accuracy_fig": per_action_acc_fig,
+            }
+
+        # ----- z_q full -----
+        if self.z_q_decoder is not None:
+            pred = predict_full(self.z_q_decoder, z_q)
+            metrics.update(compute_metrics(pred, "z_q_full"))
+
+        # ----- z_a full -----
+        if self.z_a_decoder is not None:
+            pred = predict_full(self.z_a_decoder, z_a)
+            metrics.update(compute_metrics(pred, "z_a_full"))
+
+        # ----- z_q split -----
+        if self.z_q_split_decoder is not None:
+            pred = predict_split(self.z_q_split_decoder, z_q)
+            metrics.update(compute_metrics(pred, "z_q_split"))
+
+        # ----- z_a split -----
+        if self.z_a_split_decoder is not None:
+            pred = predict_split(self.z_a_split_decoder, z_a)
+            metrics.update(compute_metrics(pred, "z_a_split"))
+
+        return metrics
+
 
 
 
@@ -1267,50 +1299,37 @@ class LatentMetricsAggregator:
         decoder_metrics = self._train_action_decoders(z_a, z_q, actions)
         metrics.update(decoder_metrics)
 
-        # --- Split decoder classification metrics (returns macroF1 and 2 figures) ---
+        # --- Split decoder classification metrics ---
         split_metrics = {}
-        # z_q metrics
-        split_metrics.update(
-            self._compute_split_decoder_classification_metrics(
-                z=z_q,
+
+        for prefix, decoder, latent in [
+            ("z_q_split", self.z_q_split_decoder, z_q),
+            ("z_a_split", self.z_a_split_decoder, z_a),
+        ]:
+            result = self._compute_split_decoder_classification_metrics(
+                z=latent,
                 actions=actions,
-                decoder=self.z_q_split_decoder,
-                prefix="z_q_split",
+                decoder=decoder,
+                prefix=prefix,
             )
-        )
-        # z_a metrics
-        split_metrics.update(
-            self._compute_split_decoder_classification_metrics(
-                z=z_a,
-                actions=actions,
-                decoder=self.z_a_split_decoder,
-                prefix="z_a_split",
-            )
-        )
-        # z_q
-        if "z_q_split_confusion_heatmap_fig" in split_metrics:
-            figures["z_q_split_confusion_heatmap"] = split_metrics.pop(
-                "z_q_split_confusion_heatmap_fig"
-            )
+            split_metrics.update(result)
 
-        if "z_q_split_per_action_accuracy_fig" in split_metrics:
-            figures["z_q_split_per_action_accuracy"] = split_metrics.pop(
-                "z_q_split_per_action_accuracy_fig"
-            )
+        # --- Extract figures ---
+        for key, fig in list(split_metrics.items()):
+            if key.endswith("_confusion_heatmap_fig"):
+                # e.g. "z_q_split_confusion_heatmap_fig" -> "z_q_split_confusion_heatmap"
+                name = key.replace("_fig", "")
+                figures[name] = fig
+                split_metrics.pop(key)
 
-        # z_a
-        if "z_a_split_confusion_heatmap_fig" in split_metrics:
-            figures["z_a_split_confusion_heatmap"] = split_metrics.pop(
-                "z_a_split_confusion_heatmap_fig"
-            )
+            if key.endswith("_per_action_accuracy_fig"):
+                name = key.replace("_fig", "")
+                figures[name] = fig
+                split_metrics.pop(key)
 
-        if "z_a_split_per_action_accuracy_fig" in split_metrics:
-            figures["z_a_split_per_action_accuracy"] = split_metrics.pop(
-                "z_a_split_per_action_accuracy_fig"
-            )
-
-        # Keep macroF1 in metrics
+        # --- Add numeric metrics (macroF1) ---
         metrics.update(split_metrics)
+
 
         return metrics, figures
 
