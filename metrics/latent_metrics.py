@@ -974,7 +974,6 @@ class LatentMetricsAggregator:
         from sklearn.preprocessing import StandardScaler
         import matplotlib.pyplot as plt
         import umap
-        import numpy as np
 
         z_a_s = StandardScaler().fit_transform(z_a[idx])
         z_q_s = StandardScaler().fit_transform(z_q[idx])
