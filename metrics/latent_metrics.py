@@ -359,7 +359,7 @@ class LatentMetricsAggregator:
 
         self.action_lookup: Dict[Tuple[float, ...], int] = {}
         self.reset()
-        self.centroids = np.array([
+        centroids_raw = np.array([
             [ 10.012674  ,  10.605386  ],
             [-47.39698   ,  -9.770397  ],
             [-20.167576  ,   0.45612565],
@@ -371,8 +371,19 @@ class LatentMetricsAggregator:
             [ -1.4817983 ,  -6.2199874 ],
         ], dtype=np.float32)
 
-        # Apply same scaling as dataset
-        self.centroids /= 100.0
+        # convert to normalized action space
+
+        ACTION_MEAN = np.array([-0.00757417, 0.00833888], dtype=np.float32)
+        ACTION_STD  = np.array([0.18500997, 0.18254188], dtype=np.float32)
+
+        # 1. scale
+        centroids_scaled = centroids_raw / 100.0
+
+        # 2. z-score normalize
+        centroids_norm = (centroids_scaled - ACTION_MEAN) / ACTION_STD
+
+        self.centroids = centroids_norm
+
 
     def _train_action_decoders(
         self,
