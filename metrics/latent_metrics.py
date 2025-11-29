@@ -491,7 +491,7 @@ class LatentMetricsAggregator:
             -1, pred_split.shape[1] * self.num_splits
         )
 
-    def plot_confusion_heatmap(self, confusion: np.ndarray, title: str = "Confusion Matrix", dpi: int = 250):
+    def plot_confusion_heatmap(self, confusion: np.ndarray, title: str = "Confusion Matrix", dpi: int = 300):
         import matplotlib.pyplot as plt
         
 
@@ -543,7 +543,7 @@ class LatentMetricsAggregator:
 
         C = len(per_acc)
 
-        fig, ax = plt.subplots(figsize=(9, 5), dpi=200)
+        fig, ax = plt.subplots(figsize=(9, 5), dpi=300)
 
         x = np.arange(C)
 
@@ -912,7 +912,7 @@ class LatentMetricsAggregator:
 
         # Plotting
         plt.style.use("seaborn-v0_8-white")
-        fig, ax = plt.subplots(figsize=(7.5, 6), dpi=250)
+        fig, ax = plt.subplots(figsize=(7.5, 6), dpi=300)
 
         im = ax.imshow(overlap_matrix, cmap="Reds", vmin=0, vmax=1, aspect="auto")
 
@@ -999,7 +999,7 @@ class LatentMetricsAggregator:
         cmap = plt.get_cmap("tab20")
 
         def nice_umap(emb: np.ndarray, labels_local: np.ndarray, title: str):
-            fig, ax = plt.subplots(figsize=(6.5, 5.5), dpi=250)
+            fig, ax = plt.subplots(figsize=(6.5, 5.5), dpi=300)
             ax.scatter(
                 emb[:, 0],
                 emb[:, 1],
@@ -1093,7 +1093,7 @@ class LatentMetricsAggregator:
         # Plotting (high DPI + frame-colored grid)
         # ----------------------------------------
         plt.style.use("seaborn-v0_8-white")
-        fig, ax = plt.subplots(figsize=(7.5, 6), dpi=250)
+        fig, ax = plt.subplots(figsize=(7.5, 6), dpi=300)
 
         im = ax.imshow(confusion, cmap="Reds", aspect="auto")
 
