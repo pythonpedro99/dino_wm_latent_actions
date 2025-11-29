@@ -1305,36 +1305,38 @@ class LatentMetricsAggregator:
         decoder_metrics = self._train_action_decoders(z_a, z_q, actions)
         metrics.update(decoder_metrics)
 
-        # --- Split decoder classification metrics ---
-        split_metrics = {}
+        # --- Compute ALL decoder metrics (full + split) ---
+        all_metrics = self._compute_all_decoder_classification_metrics(
+            z_q=z_q,
+            z_a=z_a,
+            actions=actions,
+        )
 
-        for prefix, decoder, latent in [
-            ("z_q_split", self.z_q_split_decoder, z_q),
-            ("z_a_split", self.z_a_split_decoder, z_a),
-        ]:
-            result = self._compute_split_decoder_classification_metrics(
-                z=latent,
-                actions=actions,
-                decoder=decoder,
-                prefix=prefix,
-            )
-            split_metrics.update(result)
+        # --- Split into numeric metrics + figures ---
+        figures = {}
+        numeric_metrics = {}
 
-        # --- Extract figures ---
-        for key, fig in list(split_metrics.items()):
+        for key, value in list(all_metrics.items()):
+
+            # ---- Figures ----
             if key.endswith("_confusion_heatmap_fig"):
-                # e.g. "z_q_split_confusion_heatmap_fig" -> "z_q_split_confusion_heatmap"
+                # "z_q_split_confusion_heatmap_fig" -> "z_q_split_confusion_heatmap"
                 name = key.replace("_fig", "")
-                figures[name] = fig
-                split_metrics.pop(key)
+                figures[name] = value
+                continue
 
             if key.endswith("_per_action_accuracy_fig"):
+                # "z_q_split_per_action_accuracy_fig" -> "z_q_split_per_action_accuracy"
                 name = key.replace("_fig", "")
-                figures[name] = fig
-                split_metrics.pop(key)
+                figures[name] = value
+                continue
 
-        # --- Add numeric metrics (macroF1) ---
-        metrics.update(split_metrics)
+            # ---- All other numeric metrics (macroF1 etc.) ----
+            numeric_metrics[key] = value
+
+        # --- Add numeric metrics to global metrics ---
+        metrics.update(numeric_metrics)
+
 
 
         return metrics, figures
