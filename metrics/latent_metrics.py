@@ -136,17 +136,29 @@ class LatentToActionDecoder(torch.nn.Module):
         return history
 
 def _pairwise_chebyshev(x: np.ndarray) -> np.ndarray:
-    diff = np.abs(x[:, None, :] - x[None, :, :])
-    dist = diff.max(axis=2)
+    # x: (N, D)
+    N, D = x.shape
+    dist = np.zeros((N, N), dtype=np.float64)
+
+    for d in range(D):
+        col = x[:, d]
+        diff = np.abs(col[:, None] - col[None, :])  # (N, N)
+        np.maximum(dist, diff, out=dist)
+
     np.fill_diagonal(dist, 0.0)
     return dist
+
 
 
 def _pairwise_l2(x: np.ndarray) -> np.ndarray:
-    diff = x[:, None, :] - x[None, :, :]
-    dist = np.sqrt(np.sum(diff * diff, axis=2))
-    np.fill_diagonal(dist, 0.0)
-    return dist
+    # x: (N, D)
+    x = x.astype(np.float64, copy=False)
+    x2 = np.sum(x * x, axis=1, keepdims=True)  # (N, 1)
+    dist2 = x2 + x2.T - 2.0 * (x @ x.T)        # (N, N)
+    np.maximum(dist2, 0.0, out=dist2)          # numerical safety
+    np.fill_diagonal(dist2, 0.0)
+    return np.sqrt(dist2, out=dist2)
+
 
 
 def _sample_with_indices(
@@ -173,6 +185,7 @@ def knn_mutual_information(
     y: np.ndarray,
     k: int,
     rng: np.random.Generator,
+    max_samples: Optional[int] = 5000,
 ) -> float:
     n = min(x.shape[0], y.shape[0])
     if n == 0 or n <= k:
@@ -181,12 +194,12 @@ def knn_mutual_information(
     x = x[:n]
     y = y[:n]
 
-    # Optional subsampling for large n
-    if n > 10000:
-        indices = rng.permutation(n)[:10000]
+    # Optional subsampling for large n (configurable instead of fixed 10000)
+    if max_samples is not None and n > max_samples:      # <-- CHANGED
+        indices = rng.permutation(n)[:max_samples]
         x = x[indices]
         y = y[indices]
-        n = x.shape[0]  # <-- important
+        n = x.shape[0]  # <-- still important
 
     xy = np.concatenate([x, y], axis=1)
 
@@ -209,6 +222,7 @@ def knn_mutual_information(
         + _digamma(n)
         - float(np.mean(_digamma_vector(nx + 1) + _digamma_vector(ny + 1)))
     )
+
 
 
 
