@@ -448,7 +448,13 @@ class LatentMetricsAggregator:
                 input_dim=z_a_t.shape[1] // self.num_splits,
                 action_dim=act_t.shape[1] // self.num_splits,
             )
-
+        print("Decoder training targets stats:")
+        print("mean:", act_t.mean(0))
+        print("std:", act_t.std(0))
+        print("z_q mean", z_q_t.mean(0))
+        print("z_q std", z_q_t.std(0))
+        print("z_a mean", z_a_t.mean(0))    
+        print("z_a std", z_a_t.std(0))
         hist_a = self.z_a_decoder.fit(z_a_t, act_t)
         hist_q = self.z_q_decoder.fit(z_q_t, act_t)
 
