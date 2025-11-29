@@ -154,6 +154,7 @@ class Trainer:
         self.latent_vq_model = None
         self.latent_action_down = None
         self.latent_action_up = None
+        self.latent_action_norm = None
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
@@ -392,6 +393,7 @@ class Trainer:
         self.model.latent_action_down = self.model.latent_action_down.to(self.device)
         self.model.latent_action_up = self.model.latent_action_up.to(self.device)
         self.model.latent_action_norm = self.model.latent_action_norm.to(self.device)
+        self.latent_action_norm = self.model.latent_action_norm
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(
