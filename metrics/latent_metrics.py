@@ -9,9 +9,9 @@ from sklearn.preprocessing import StandardScaler
 
 class LatentToActionDecoder(torch.nn.Module):
     """
-    Simple MLP that decodes a latent vector (z_a or z_q) back to the
-    continuous action space. The module stores its own training hyperparameters
-    and exposes a ``fit`` method for reuse.
+    MLP decoder that outputs normalized actions.
+    Adds a learnable affine output layer (scale + bias)
+    to avoid variance collapse when targets are z-scored.
     """
 
     def __init__(
@@ -29,6 +29,7 @@ class LatentToActionDecoder(torch.nn.Module):
     ) -> None:
         super().__init__()
 
+        # Core MLP
         self.net = torch.nn.Sequential(
             torch.nn.Linear(input_dim, hidden_dim),
             torch.nn.ReLU(),
@@ -36,6 +37,10 @@ class LatentToActionDecoder(torch.nn.Module):
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, action_dim),
         )
+
+        # NEW: learnable affine transform on output
+        self.out_scale = torch.nn.Parameter(torch.ones(action_dim))
+        self.out_bias  = torch.nn.Parameter(torch.zeros(action_dim))
 
         self.batch_size = batch_size
         self.num_epochs = num_epochs
@@ -48,13 +53,18 @@ class LatentToActionDecoder(torch.nn.Module):
         self.to(self.device)
 
     def reset_parameters(self):
-        """Reinitialize all weights of the MLP."""
         for module in self.net.modules():
             if hasattr(module, "reset_parameters"):
                 module.reset_parameters()
+        # also reset the affine head
+        torch.nn.init.ones_(self.out_scale)
+        torch.nn.init.zeros_(self.out_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x)
+        y = self.net(x)
+        # Apply learnable affine transform
+        return y * self.out_scale + self.out_bias
+
 
     def fit(self, x: torch.Tensor, y: torch.Tensor) -> Dict[str, List[float]]:
         """
