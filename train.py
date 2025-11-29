@@ -185,6 +185,7 @@ class Trainer:
             "latent_action_down",
             "latent_action_up",
             "latent_optimizer",
+            "latent_action_norm",
         ]
         self.init_models()
         self._init_latent_metric_analyzer()
@@ -428,6 +429,7 @@ class Trainer:
             self.latent_vq_model.parameters(),
             self.latent_action_down.parameters(),
             self.latent_action_up.parameters(),
+            self.model.latent_action_norm.parameters(),
         )
         self.latent_optimizer = torch.optim.AdamW(
             latent_params,
