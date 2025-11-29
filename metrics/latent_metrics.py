@@ -387,6 +387,7 @@ class LatentMetricsAggregator:
                 input_dim=z_q_t.shape[1],
                 action_dim=act_t.shape[1],
             )
+
         if self.z_q_split_decoder is None:
             assert (
                 z_q_t.shape[1] % self.num_splits == 0
@@ -447,25 +448,35 @@ class LatentMetricsAggregator:
 
         return metrics
 
-    def _predict_actions_from_z_q_split(self, z_q: np.ndarray) -> np.ndarray:
-        """Run the trained z_q split decoder to predict primitive actions."""
+    def _predict_actions_from_split(
+        self, z: np.ndarray, decoder
+    ) -> np.ndarray:
+        """Run a trained split decoder (z_q or z_a) to predict primitive actions."""
 
-        if self.z_q_split_decoder is None or z_q.size == 0:
+        if decoder is None or z.size == 0:
             return np.empty((0,))
 
-        device = next(self.z_q_split_decoder.parameters()).device
-        z_q_t = torch.from_numpy(z_q).float().to(device)
-        z_q_split = z_q_t.reshape(
-            -1, self.num_splits, z_q_t.shape[1] // self.num_splits
-        ).reshape(-1, z_q_t.shape[1] // self.num_splits)
+        device = next(decoder.parameters()).device
+        z_t = torch.from_numpy(z).float().to(device)
 
-        self.z_q_split_decoder.eval()
+        # split into [batch, num_splits, dim_per_split] then flatten splits to feed decoder
+        if z_t.shape[1] % self.num_splits != 0:
+            raise ValueError(
+                f"Latent dim {z_t.shape[1]} is not divisible by num_splits={self.num_splits}"
+            )
+
+        dim_per_split = z_t.shape[1] // self.num_splits
+        z_split = z_t.reshape(-1, self.num_splits, dim_per_split).reshape(-1, dim_per_split)
+
+        decoder.eval()
         with torch.no_grad():
-            pred_split = self.z_q_split_decoder(z_q_split).cpu().numpy()
+            pred_split = decoder(z_split).cpu().numpy()
 
+        # reshape back to [batch, num_splits * action_dim]
         return pred_split.reshape(-1, self.num_splits, pred_split.shape[1]).reshape(
             -1, pred_split.shape[1] * self.num_splits
         )
+
     def plot_confusion_heatmap(self, confusion: np.ndarray, title: str = "Confusion Matrix", dpi: int = 250):
         import matplotlib.pyplot as plt
         
@@ -595,33 +606,48 @@ class LatentMetricsAggregator:
         return recall, np.nanmean(recall)
 
     def _compute_split_decoder_classification_metrics(
-        self, z_q: np.ndarray, actions: np.ndarray
+        self,
+        z: np.ndarray,
+        actions: np.ndarray,
+        decoder,
+        prefix: str,
     ) -> Dict[str, object]:
-        if z_q.size == 0 or actions.size == 0:
+        """
+        Compute classification metrics for a split decoder (z_q or z_a).
+
+        prefix examples:
+        - "z_q_split"
+        - "z_a_split"
+        """
+        if z.size == 0 or actions.size == 0:
             return {}
 
-        pred_actions = self._predict_actions_from_z_q_split(z_q)
+        pred_actions = self._predict_actions_from_split(z, decoder)
         if pred_actions.size == 0:
             return {}
 
         true_labels = self._actions_to_labels(actions).reshape(-1)
         pred_labels = self._actions_to_labels(pred_actions).reshape(-1)
 
-        # compute confusion
+        # confusion matrix and macro-F1
         confusion, _ = self._compute_confusion_matrix(true_labels, pred_labels)
-
-        # compute summary metric
         macro_f1 = self._compute_macro_f1(confusion)
 
-        # FIGURES
-        confusion_fig = self.plot_confusion_heatmap(confusion, "Decoder: Codes Action Confusion Matrix")
+        # figures
+        confusion_fig = self.plot_confusion_heatmap(
+            confusion,
+            f"Decoder ({prefix}): Codes Action Confusion Matrix",
+        )
         per_action_acc, _ = self.compute_per_action_recall(confusion)
-        per_action_acc_fig = self.plot_per_action_accuracy(per_action_acc, "Decoder: Codes Action Accuracy")
+        per_action_acc_fig = self.plot_per_action_accuracy(
+            per_action_acc,
+            f"Decoder ({prefix}): Codes Action Accuracy",
+        )
 
         return {
-            "z_q_split_macro_f1": macro_f1,
-            "z_q_split_confusion_heatmap_fig": confusion_fig,
-            "z_q_split_per_action_accuracy_fig": per_action_acc_fig,
+            f"{prefix}_macro_f1": macro_f1,
+            f"{prefix}_confusion_heatmap_fig": confusion_fig,
+            f"{prefix}_per_action_accuracy_fig": per_action_acc_fig,
         }
 
 
@@ -1160,14 +1186,46 @@ class LatentMetricsAggregator:
         metrics.update(decoder_metrics)
 
         # --- Split decoder classification metrics (returns macroF1 and 2 figures) ---
-        split_metrics = self._compute_split_decoder_classification_metrics(z_q, actions)
-
-        # Inject split-decoder figures into figures dict
+        split_metrics = {}
+        # z_q metrics
+        split_metrics.update(
+            self._compute_split_decoder_classification_metrics(
+                z=z_q,
+                actions=actions,
+                decoder=self.z_q_split_decoder,
+                prefix="z_q_split",
+            )
+        )
+        # z_a metrics
+        split_metrics.update(
+            self._compute_split_decoder_classification_metrics(
+                z=z_a,
+                actions=actions,
+                decoder=self.z_a_split_decoder,
+                prefix="z_a_split",
+            )
+        )
+        # z_q
         if "z_q_split_confusion_heatmap_fig" in split_metrics:
-            figures["z_q_split_confusion_heatmap"] = split_metrics.pop("z_q_split_confusion_heatmap_fig")
+            figures["z_q_split_confusion_heatmap"] = split_metrics.pop(
+                "z_q_split_confusion_heatmap_fig"
+            )
 
         if "z_q_split_per_action_accuracy_fig" in split_metrics:
-            figures["z_q_split_per_action_accuracy"] = split_metrics.pop("z_q_split_per_action_accuracy_fig")
+            figures["z_q_split_per_action_accuracy"] = split_metrics.pop(
+                "z_q_split_per_action_accuracy_fig"
+            )
+
+        # z_a
+        if "z_a_split_confusion_heatmap_fig" in split_metrics:
+            figures["z_a_split_confusion_heatmap"] = split_metrics.pop(
+                "z_a_split_confusion_heatmap_fig"
+            )
+
+        if "z_a_split_per_action_accuracy_fig" in split_metrics:
+            figures["z_a_split_per_action_accuracy"] = split_metrics.pop(
+                "z_a_split_per_action_accuracy_fig"
+            )
 
         # Keep macroF1 in metrics
         metrics.update(split_metrics)
