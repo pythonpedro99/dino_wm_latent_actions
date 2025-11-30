@@ -15,7 +15,7 @@ class VWorldModel(nn.Module):
         decoder,
         predictor,
         latent_action_model,
-        latent_vq_model,
+        latent_vq_model=None,
         latent_action_down,
         latent_action_up,
         ema_decay=0.99,

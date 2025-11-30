@@ -412,9 +412,12 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
             patch_size=getattr(result["encoder"], "patch_size", 1),
         )
     if "latent_vq_model" not in result:
-        result["latent_vq_model"] = hydra.utils.instantiate(
-            train_cfg.latent_vq_model,
-        )
+        if getattr(train_cfg, "latent_vq_model", None) is not None:
+            result["latent_vq_model"] = hydra.utils.instantiate(
+                train_cfg.latent_vq_model,
+            )
+        else:
+            result["latent_vq_model"] = None
     if "latent_action_down" not in result:
         result["latent_action_down"] = nn.Linear(encoder_emb_dim, latent_dim)
     if "latent_action_up" not in result:

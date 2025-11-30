@@ -229,6 +229,11 @@ class Trainer:
             self.latent_metric_analyzer = None
             return
 
+        if self.latent_vq_model is None:
+            log.warning("latent_vq_model is None. Disabling latent metrics.")
+            self.latent_metric_analyzer = None
+            return
+
         num_codes = getattr(self.latent_vq_model, "num_codes", None)
         if num_codes is None:
             log.warning("latent_vq_model is missing num_codes. Disabling latent metrics.")
@@ -346,7 +351,7 @@ class Trainer:
                 model_dim=self.encoder.emb_dim,
                 patch_size=getattr(self.encoder, "patch_size", 1),
             )
-        if self.latent_vq_model is None:
+        if self.latent_vq_model is None and getattr(self.cfg, "latent_vq_model", None) is not None:
             self.latent_vq_model = hydra.utils.instantiate(
                 self.cfg.latent_vq_model,
             )
@@ -363,15 +368,17 @@ class Trainer:
 
         (
             self.latent_action_model,
-            self.latent_vq_model,
             self.latent_action_down,
             self.latent_action_up,
         ) = self.accelerator.prepare(
             self.latent_action_model,
-            self.latent_vq_model,
             self.latent_action_down,
             self.latent_action_up,
         )
+        if self.latent_vq_model is not None:
+            (self.latent_vq_model,) = self.accelerator.prepare(
+                self.latent_vq_model,
+            )
 
         self.model = hydra.utils.instantiate(
             self.cfg.model,
@@ -426,13 +433,16 @@ class Trainer:
             )
             self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
 
-        latent_params = itertools.chain(
+        latent_param_groups = [
             self.latent_action_model.parameters(),
-            self.latent_vq_model.parameters(),
             self.latent_action_down.parameters(),
             self.latent_action_up.parameters(),
             self.model.latent_action_norm.parameters(),
-        )
+        ]
+        if self.latent_vq_model is not None:
+            latent_param_groups.append(self.latent_vq_model.parameters())
+
+        latent_params = itertools.chain(*latent_param_groups)
         self.latent_optimizer = torch.optim.AdamW(
             latent_params,
             lr=self.cfg.training.latent_lr,
