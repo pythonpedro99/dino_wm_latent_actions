@@ -361,21 +361,21 @@ class VWorldModel(nn.Module):
 
             # Compute loss for visual, proprio dims (i.e. exclude action dims)
             if self.concat_dim == 0:
-                z_visual_loss = self.emb_criterion(z_pred[:, :, :-2, :], z_tgt[:, :, :-2, :].detach())
-                z_proprio_loss = self.emb_criterion(z_pred[:, :, -2, :], z_tgt[:, :, -2, :].detach())
-                z_loss = self.emb_criterion(z_pred[:, :, :-1, :], z_tgt[:, :, :-1, :].detach())
+                z_visual_loss = self.emb_criterion(z_pred[:, :, :-2, :], z_tgt[:, :, :-2, :])
+                z_proprio_loss = self.emb_criterion(z_pred[:, :, -2, :], z_tgt[:, :, -2, :])
+                z_loss = self.emb_criterion(z_pred[:, :, :-1, :], z_tgt[:, :, :-1, :])
             elif self.concat_dim == 1:
                 z_visual_loss = self.emb_criterion(
                     z_pred[:, :, :, :-(self.proprio_dim + self.action_dim)], \
-                    z_tgt[:, :, :, :-(self.proprio_dim + self.action_dim)].detach()
+                    z_tgt[:, :, :, :-(self.proprio_dim + self.action_dim)]
                 )
                 z_proprio_loss = self.emb_criterion(
-                    z_pred[:, :, :, -(self.proprio_dim + self.action_dim): -self.action_dim], 
-                    z_tgt[:, :, :, -(self.proprio_dim + self.action_dim): -self.action_dim].detach()
+                    z_pred[:, :, :, -(self.proprio_dim + self.action_dim): -self.action_dim],
+                    z_tgt[:, :, :, -(self.proprio_dim + self.action_dim): -self.action_dim]
                 )
                 z_loss = self.emb_criterion(
-                    z_pred[:, :, :, :-self.action_dim], 
-                    z_tgt[:, :, :, :-self.action_dim].detach()
+                    z_pred[:, :, :, :-self.action_dim],
+                    z_tgt[:, :, :, :-self.action_dim]
                 )
 
             loss = loss + z_loss
