@@ -179,7 +179,7 @@ class VWorldModel(nn.Module):
         # ====== 5) VQ ======
         vq_outputs = self.latent_vq_model(latent_actions)  # expects (B, T, 1, D)
         quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)  # (B, T, D)
-        vq_outputs["indices"] = vq_outputs["indices"]..squeeze(2)   # (B, T)
+        vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)   # (B, T)
 
         if debug_this_call:
             # Stats for z_q
