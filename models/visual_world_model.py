@@ -114,40 +114,129 @@ class VWorldModel(nn.Module):
             self.decoder.eval()
 
     def encode(self, obs, act):
-        z_dct = self.encode_obs(obs)
+        z_dct = self.encode_obs(obs)  # z_dct["visual"]: (B, T, P, E)
+        visual_tokens = z_dct["visual"]
+        B, T, P, E = visual_tokens.shape
 
-        latent_actions = self.latent_action_model(z_dct["visual"])["action_patches"]
-        latent_actions = self.latent_action_down(latent_actions)
-        latent_actions = self.latent_action_norm(latent_actions)
+        # ====== DEBUG: collapse checks ======
+        # This runs only on the first call. Remove the guard if you want it every time.
+        debug_this_call = not hasattr(self, "_collapse_debug_done")
+        
+        def _log_stats(name, x: torch.Tensor):
+            """
+            x: (B, T, ..., D) – we aggregate over all dims except the last (feature dim).
+            """
+            with torch.no_grad():
+                # std/mean over all but last dim
+                dims = tuple(range(x.dim() - 1))
+                mean = x.mean(dim=dims)
+                std = x.std(dim=dims)
+
+                # how many dims are effectively "collapsed"
+                near_zero = (std < 1e-5).sum().item()
+                total = std.numel()
+
+                # Print first 10 dims for readability
+                print(f"{name} mean (first 10): {mean[:10].detach().cpu()}")
+                print(f"{name} std  (first 10): {std[:10].detach().cpu()}")
+                print(f"{name} near-zero-std dims: {near_zero}/{total}")
+
+        if debug_this_call:
+            with torch.no_grad():
+                # Also log real action stats as a baseline
+                # assuming act: (B, T, A)
+                if act is not None:
+                    dims = (0, 1) if act.dim() == 3 else tuple(range(act.dim() - 1))
+                    act_mean = act.mean(dim=dims)
+                    act_std = act.std(dim=dims)
+                    print("Decoder training targets stats (actions):")
+                    print("act mean (first 10):", act_mean[:10].detach().cpu())
+                    print("act std  (first 10):", act_std[:10].detach().cpu())
+
+        # ====== 1) SP-Transformer: action_patches ======
+        latent_actions = self.latent_action_model(visual_tokens)["action_patches"]  # (B, T, 1, E)
+        if debug_this_call:
+            _log_stats("action_patches (SP-Transformer out)", latent_actions)
+
+        # ====== 2) Down-projection ======
+        latent_actions = self.latent_action_down(latent_actions)  # (B, T, 1, latent_dim)
+        if debug_this_call:
+            _log_stats("latent_actions after down-projection", latent_actions)
+
+        # ====== 3) LayerNorm ======
+        latent_actions = self.latent_action_norm(latent_actions)  # (B, T, 1, latent_dim)
+        if debug_this_call:
+            _log_stats("latent_actions after LayerNorm (z_a pre-shift)", latent_actions)
+
+        # ====== 4) Temporal shift / repeat last frame ======
         latent_actions = torch.cat(
             [latent_actions[:, 1:, :, :], latent_actions[:, -1:, :, :]],
             dim=1
-        )
+        )  # still (B, T, 1, latent_dim)
+        if debug_this_call:
+            _log_stats("latent_actions after temporal shift", latent_actions)
 
-        vq_outputs = self.latent_vq_model(latent_actions)
-        quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)
-        vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)
+        # ====== 5) VQ ======
+        vq_outputs = self.latent_vq_model(latent_actions)  # expects (B, T, 1, D)
+        quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)  # (B, T, D)
+        vq_outputs["indices"] = vq_outputs["indices"]..squeeze(2)   # (B, T)
 
-        proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))
+        if debug_this_call:
+            # Stats for z_q
+            _log_stats("z_q (quantized_latent_actions)", quantized_latent_actions)
+
+            # VQ code usage
+            with torch.no_grad():
+                indices = vq_outputs["indices"]  # (B, T)
+                unique, counts = indices.unique(return_counts=True)
+                print(f"VQ: num unique codes used: {unique.numel()}")
+                top_k = min(10, unique.numel())
+                print("VQ: top codes (code, count):", list(zip(
+                    unique[:top_k].tolist(),
+                    counts[:top_k].tolist()
+                )))
+                # If latent_vq_model has num_codes attribute, log that too
+                if hasattr(self.latent_vq_model, "num_codes"):
+                    print(f"VQ: total available codes: {self.latent_vq_model.num_codes}")
+
+            # Mark debug as done so we don't spam every step
+            self._collapse_debug_done = True
+
+        # ====== 6) Build z with proprio + action token ======
+        proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))  # (B, T, 1, P_proprio)
 
         if self.concat_dim == 0:
-            act_token = quantized_latent_actions.unsqueeze(2)
+            # concat along token dimension
+            act_token = quantized_latent_actions.unsqueeze(2)  # (B, T, 1, D)
             z = torch.cat([z_dct["visual"], proprio_token, act_token], dim=2)
-
-        if self.concat_dim == 1:
-            proprio_tiled = repeat(proprio_token, "b t 1 a -> b t f a", f=z_dct["visual"].shape[2])
-            proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
-            act_tiled = repeat(quantized_latent_actions.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct["visual"].shape[2])
-            act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
-            z = torch.cat([z_dct['visual'], proprio_repeated, act_repeated], dim=3)
+        elif self.concat_dim == 1:
+            # concat along feature dimension (per patch)
+            proprio_tiled = repeat(
+                proprio_token, "b t 1 a -> b t f a", f=z_dct["visual"].shape[2]
+            )
+            proprio_repeated = proprio_tiled.repeat(
+                1, 1, 1, self.num_proprio_repeat
+            )  # (B, T, F, A * num_proprio_repeat)
+            act_tiled = repeat(
+                quantized_latent_actions.unsqueeze(2),
+                "b t 1 a -> b t f a",
+                f=z_dct["visual"].shape[2],
+            )
+            act_repeated = act_tiled.repeat(
+                1, 1, 1, self.num_action_repeat
+            )  # (B, T, F, D * num_action_repeat)
+            z = torch.cat([z_dct["visual"], proprio_repeated, act_repeated], dim=3)
+        else:
+            raise ValueError(f"Unknown concat_dim={self.concat_dim}")
 
         return {
             "z": z,
             "vq_outputs": vq_outputs,
-            "latent_actions": latent_actions.squeeze(2),
-            "quantized_latent_actions": quantized_latent_actions,
-            "visual_embs": z_dct["visual"]
+            "latent_actions": latent_actions.squeeze(2),          # (B, T, D)
+            "quantized_latent_actions": quantized_latent_actions, # (B, T, D)
+            "visual_embs": z_dct["visual"],                       # (B, T, P, E)
         }
+
 
 
 
