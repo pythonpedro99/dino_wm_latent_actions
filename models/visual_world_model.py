@@ -218,7 +218,7 @@ class VWorldModel(nn.Module):
                 1, 1, 1, self.num_proprio_repeat
             )  # (B, T, F, A * num_proprio_repeat)
             act_tiled = repeat(
-                quantized_latent_actions.unsqueeze(2),
+                latent_actions.unsqueeze(2),
                 "b t 1 a -> b t f a",
                 f=z_dct["visual"].shape[2],
             )
