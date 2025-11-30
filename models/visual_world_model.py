@@ -44,7 +44,8 @@ class VWorldModel(nn.Module):
         self.latent_vq_model = latent_vq_model
         self.latent_action_down = latent_action_down
         self.latent_action_up = latent_action_up
-        self.latent_action_norm = nn.LayerNorm(getattr(self.latent_action_down, "out_features", latent_action_dim))
+        self.latent_action_norm = nn.LayerNorm(latent_action_dim, eps=1e-5, elementwise_affine=True)
+
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder

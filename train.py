@@ -350,7 +350,7 @@ class Trainer:
             self.latent_vq_model = hydra.utils.instantiate(
                 self.cfg.latent_vq_model,
             )
-
+        # TODO: check latent dim consistency
         latent_dim = (
             self.cfg.model.codebook_splits * self.cfg.model.codebook_dim
             if hasattr(self.cfg.model, "codebook_splits")
