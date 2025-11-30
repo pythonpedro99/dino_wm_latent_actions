@@ -91,7 +91,7 @@ plan_settings:
   alpha: [0.1, 1]
 
 metrics:
-  enabled: True
+  enabled: False
   max_samples: 4096
   mi_k: 5
   knn_k: 10
