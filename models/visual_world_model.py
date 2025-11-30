@@ -57,6 +57,7 @@ class VWorldModel(nn.Module):
         self.encoder_emb_dim = self.encoder.emb_dim
         self.codebook_splits = codebook_splits
         self.codebook_dim = codebook_dim
+        self.use_vq = False
 
         print(f"num_action_repeat: {self.num_action_repeat}")
         print(f"num_proprio_repeat: {self.num_proprio_repeat}")
