@@ -119,37 +119,25 @@ class VWorldModel(nn.Module):
         B, T, P, E = visual_tokens.shape
 
         # ====== DEBUG: collapse checks ======
-        # Initialize a per-call counter the first time
         if not hasattr(self, "_collapse_debug_counter"):
             self._collapse_debug_counter = 0
 
-        # Log every 5th call (0, 5, 10, ...) – you can change 5 or add a max cap.
         debug_this_call = (self._collapse_debug_counter % 5 == 0)
         self._collapse_debug_counter += 1
 
         def _log_stats(name, x: torch.Tensor):
-            """
-            x: (B, T, ..., D) – we aggregate over all dims except the last (feature dim).
-            """
             with torch.no_grad():
-                # std/mean over all but last dim
                 dims = tuple(range(x.dim() - 1))
                 mean = x.mean(dim=dims)
                 std = x.std(dim=dims)
-
-                # how many dims are effectively "collapsed"
                 near_zero = (std < 1e-5).sum().item()
                 total = std.numel()
-
-                # Print first 10 dims for readability
                 print(f"{name} mean (first 10): {mean[:10].detach().cpu()}")
                 print(f"{name} std  (first 10): {std[:10].detach().cpu()}")
                 print(f"{name} near-zero-std dims: {near_zero}/{total}")
 
         if debug_this_call:
             with torch.no_grad():
-                # Also log real action stats as a baseline
-                # assuming act: (B, T, A)
                 if act is not None:
                     if act.dim() == 3:
                         dims = (0, 1)
@@ -180,38 +168,48 @@ class VWorldModel(nn.Module):
         latent_actions = torch.cat(
             [latent_actions[:, 1:, :, :], latent_actions[:, -1:, :, :]],
             dim=1
-        )  # still (B, T, 1, latent_dim)
+        )  # (B, T, 1, latent_dim)
         if debug_this_call:
-            _log_stats("latent_actions after temporal shift", latent_actions)
+            _log_stats("latent_actions after temporal shift (z_a)", latent_actions)
 
-        # ====== 5) VQ ======
-        vq_outputs = self.latent_vq_model(latent_actions)  # expects (B, T, 1, D)
-        quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)  # (B, T, D)
-        vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)    # (B, T)
+        # ====== 5) (OPTIONAL) VQ ======
+        # Add a flag in __init__: self.use_vq = False to bypass quantization.
+        if getattr(self, "use_vq", False):
+            vq_outputs = self.latent_vq_model(latent_actions)  # expects (B, T, 1, D)
+            quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)  # (B, T, D)
+            vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)    # (B, T)
 
-        if debug_this_call:
-            # Stats for z_q
-            _log_stats("z_q (quantized_latent_actions)", quantized_latent_actions)
+            if debug_this_call:
+                _log_stats("z_q (quantized_latent_actions)", quantized_latent_actions)
+                with torch.no_grad():
+                    indices = vq_outputs["indices"]  # (B, T)
+                    unique, counts = indices.unique(return_counts=True)
+                    print(f"VQ: num unique codes used: {unique.numel()}")
+                    top_k = min(10, unique.numel())
+                    print("VQ: top codes (code, count):", list(zip(
+                        unique[:top_k].tolist(),
+                        counts[:top_k].tolist()
+                    )))
+                    if hasattr(self.latent_vq_model, "num_codes"):
+                        print(f"VQ: total available codes: {self.latent_vq_model.num_codes}")
 
-            # VQ code usage
-            with torch.no_grad():
-                indices = vq_outputs["indices"]  # (B, T)
-                unique, counts = indices.unique(return_counts=True)
-                print(f"VQ: num unique codes used: {unique.numel()}")
-                top_k = min(10, unique.numel())
-                print("VQ: top codes (code, count):", list(zip(
-                    unique[:top_k].tolist(),
-                    counts[:top_k].tolist()
-                )))
-                if hasattr(self.latent_vq_model, "num_codes"):
-                    print(f"VQ: total available codes: {self.latent_vq_model.num_codes}")
+            act_latent_for_pred = quantized_latent_actions  # (B, T, D)
+        else:
+            # === BYPASS VQ: USE CONTINUOUS z_a ===
+            vq_outputs = {
+                "z_q_st": latent_actions,          # keep shape (B, T, 1, D) if anything expects it
+                "indices": None,
+            }
+            act_latent_for_pred = latent_actions.squeeze(2)  # (B, T, D)
+            if debug_this_call:
+                _log_stats("z_a (continuous, no VQ)", act_latent_for_pred)
 
         # ====== 6) Build z with proprio + action token ======
         proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))  # (B, T, 1, P_proprio)
 
         if self.concat_dim == 0:
             # concat along token dimension
-            act_token = quantized_latent_actions.unsqueeze(2)  # (B, T, 1, D)
+            act_token = act_latent_for_pred.unsqueeze(2)  # (B, T, 1, D)
             z = torch.cat([z_dct["visual"], proprio_token, act_token], dim=2)
         elif self.concat_dim == 1:
             # concat along feature dimension (per patch)
@@ -222,7 +220,7 @@ class VWorldModel(nn.Module):
                 1, 1, 1, self.num_proprio_repeat
             )
             act_tiled = repeat(
-                quantized_latent_actions.unsqueeze(2),
+                act_latent_for_pred.unsqueeze(2),
                 "b t 1 a -> b t f a",
                 f=z_dct["visual"].shape[2],
             )
@@ -235,11 +233,12 @@ class VWorldModel(nn.Module):
 
         return {
             "z": z,
-            "vq_outputs": vq_outputs,
-            "latent_actions": latent_actions.squeeze(2),           # (B, T, D)
-            "quantized_latent_actions": quantized_latent_actions,  # (B, T, D)
-            "visual_embs": z_dct["visual"],                        # (B, T, P, E)
+            "vq_outputs": vq_outputs,                       # now mostly dummy if use_vq=False
+            "latent_actions": act_latent_for_pred,          # (B, T, D) == z_a after shift
+            "quantized_latent_actions": act_latent_for_pred,  # keep key for compatibility
+            "visual_embs": z_dct["visual"],                 # (B, T, P, E)
         }
+
 
 
 
