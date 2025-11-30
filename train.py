@@ -560,7 +560,7 @@ class Trainer:
                 self.action_encoder_optimizer.zero_grad()
             self.latent_optimizer.zero_grad()
 
-            vq_loss = 0.0 #loss_components.get("vq_loss")
+            vq_loss = loss_components.get("vq_loss")
             retain_graph = vq_loss is not None
             # VQ loss is returned separately by the model, so prediction_loss
             # contains only the terms meant to drive the predictor/decoder.
