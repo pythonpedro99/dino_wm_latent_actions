@@ -119,9 +119,14 @@ class VWorldModel(nn.Module):
         B, T, P, E = visual_tokens.shape
 
         # ====== DEBUG: collapse checks ======
-        # This runs only on the first call. Remove the guard if you want it every time.
-        debug_this_call = not hasattr(self, "_collapse_debug_done")
-        
+        # Initialize a per-call counter the first time
+        if not hasattr(self, "_collapse_debug_counter"):
+            self._collapse_debug_counter = 0
+
+        # Log every 5th call (0, 5, 10, ...) – you can change 5 or add a max cap.
+        debug_this_call = (self._collapse_debug_counter % 5 == 0)
+        self._collapse_debug_counter += 1
+
         def _log_stats(name, x: torch.Tensor):
             """
             x: (B, T, ..., D) – we aggregate over all dims except the last (feature dim).
@@ -146,7 +151,10 @@ class VWorldModel(nn.Module):
                 # Also log real action stats as a baseline
                 # assuming act: (B, T, A)
                 if act is not None:
-                    dims = (0, 1) if act.dim() == 3 else tuple(range(act.dim() - 1))
+                    if act.dim() == 3:
+                        dims = (0, 1)
+                    else:
+                        dims = tuple(range(act.dim() - 1))
                     act_mean = act.mean(dim=dims)
                     act_std = act.std(dim=dims)
                     print("Decoder training targets stats (actions):")
@@ -179,7 +187,7 @@ class VWorldModel(nn.Module):
         # ====== 5) VQ ======
         vq_outputs = self.latent_vq_model(latent_actions)  # expects (B, T, 1, D)
         quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)  # (B, T, D)
-        vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)   # (B, T)
+        vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)    # (B, T)
 
         if debug_this_call:
             # Stats for z_q
@@ -195,12 +203,8 @@ class VWorldModel(nn.Module):
                     unique[:top_k].tolist(),
                     counts[:top_k].tolist()
                 )))
-                # If latent_vq_model has num_codes attribute, log that too
                 if hasattr(self.latent_vq_model, "num_codes"):
                     print(f"VQ: total available codes: {self.latent_vq_model.num_codes}")
-
-            # Mark debug as done so we don't spam every step
-            self._collapse_debug_done = True
 
         # ====== 6) Build z with proprio + action token ======
         proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))  # (B, T, 1, P_proprio)
@@ -216,7 +220,7 @@ class VWorldModel(nn.Module):
             )
             proprio_repeated = proprio_tiled.repeat(
                 1, 1, 1, self.num_proprio_repeat
-            )  # (B, T, F, A * num_proprio_repeat)
+            )
             act_tiled = repeat(
                 quantized_latent_actions.unsqueeze(2),
                 "b t 1 a -> b t f a",
@@ -224,7 +228,7 @@ class VWorldModel(nn.Module):
             )
             act_repeated = act_tiled.repeat(
                 1, 1, 1, self.num_action_repeat
-            )  # (B, T, F, D * num_action_repeat)
+            )
             z = torch.cat([z_dct["visual"], proprio_repeated, act_repeated], dim=3)
         else:
             raise ValueError(f"Unknown concat_dim={self.concat_dim}")
@@ -232,10 +236,11 @@ class VWorldModel(nn.Module):
         return {
             "z": z,
             "vq_outputs": vq_outputs,
-            "latent_actions": latent_actions.squeeze(2),          # (B, T, D)
-            "quantized_latent_actions": quantized_latent_actions, # (B, T, D)
-            "visual_embs": z_dct["visual"],                       # (B, T, P, E)
+            "latent_actions": latent_actions.squeeze(2),           # (B, T, D)
+            "quantized_latent_actions": quantized_latent_actions,  # (B, T, D)
+            "visual_embs": z_dct["visual"],                        # (B, T, P, E)
         }
+
 
 
 
