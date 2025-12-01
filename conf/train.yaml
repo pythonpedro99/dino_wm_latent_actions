@@ -36,6 +36,7 @@ training:
   epochs: 5
   batch_size: 14 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
+  val_every_x_steps: 0 # set >0 to run validation every N training steps
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
   encoder_lr: 1e-6
