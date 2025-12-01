@@ -73,6 +73,8 @@ class Trainer:
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
         self.total_epochs = self.cfg.training.epochs
         self.epoch = 0
+        self.global_step = 0
+        self.val_every_x_steps = getattr(self.cfg.training, "val_every_x_steps", 0)
 
         assert cfg.training.batch_size % self.accelerator.num_processes == 0, (
             "Batch size must be divisible by the number of processes. "
@@ -193,6 +195,7 @@ class Trainer:
         self.init_optimizers()
 
         self.epoch_log = OrderedDict()
+        self.segment_log = OrderedDict()
 
     def save_ckpt(self):
         self.accelerator.wait_for_everyone()
@@ -542,9 +545,12 @@ class Trainer:
         return logs
 
     def train(self):
-        for i, data in enumerate(
-            tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
-        ):
+        train_bar = tqdm(
+            self.dataloaders["train"],
+            desc=f"Epoch {self.epoch} Train",
+            disable=not self.accelerator.is_local_main_process,
+        )
+        for i, data in enumerate(train_bar):
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
             self.model.train()
@@ -584,11 +590,18 @@ class Trainer:
             self.latent_optimizer.step()
 
             loss = self.accelerator.gather_for_metrics(loss).mean()
+            loss_scalar = loss.item()
+            if self.accelerator.is_local_main_process:
+                train_bar.set_postfix({"train_loss": f"{loss_scalar:.4f}"})
+            self.accelerator.print(
+                f"Epoch {self.epoch} Step {self.global_step + 1}: train_loss={loss_scalar:.4f}"
+            )
 
             loss_components = self.accelerator.gather_for_metrics(loss_components)
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
+            self.global_step += 1
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
@@ -649,6 +662,11 @@ class Trainer:
 
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
+
+            if self.val_every_x_steps and self.global_step % self.val_every_x_steps == 0:
+                self.accelerator.wait_for_everyone()
+                self.val()
+                self.logs_flash(step=self.global_step, use_segment=True)
 
     def val(self):
         self.model.eval()
@@ -864,25 +882,41 @@ class Trainer:
             if isinstance(value, torch.Tensor):
                 value = value.detach().cpu().item()
             length = len(value)
-            count, total = self.epoch_log.get(key, (0, 0.0))
-            self.epoch_log[key] = (
-                count + length,
-                total + sum(value),
-            )
+            for log_store in (self.epoch_log, self.segment_log):
+                count, total = log_store.get(key, (0, 0.0))
+                log_store[key] = (
+                    count + length,
+                    total + sum(value),
+                )
 
-    def logs_flash(self, step):
+    def logs_flash(self, step, use_segment=False):
+        log_source = self.segment_log if use_segment else self.epoch_log
+        if len(log_source) == 0:
+            return
+
         epoch_log = OrderedDict()
-        for key, value in self.epoch_log.items():
+        for key, value in log_source.items():
             count, sum = value
             to_log = sum / count
             epoch_log[key] = to_log
         epoch_log["epoch"] = step
-        log.info(f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
-                Validation loss: {epoch_log['val_loss']:.4f}")
+
+        train_loss = epoch_log.get("train_loss")
+        val_loss = epoch_log.get("val_loss")
+        log.info(
+            "Epoch %s  Training loss: %s  Validation loss: %s",
+            self.epoch,
+            f"{train_loss:.4f}" if train_loss is not None else "N/A",
+            f"{val_loss:.4f}" if val_loss is not None else "N/A",
+        )
 
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
-        self.epoch_log = OrderedDict()
+        if use_segment:
+            self.segment_log = OrderedDict()
+        else:
+            self.epoch_log = OrderedDict()
+            self.segment_log = OrderedDict()
 
     def update_latent_metrics(self, encode_output, act, z_out):
         if self.latent_metric_analyzer is None:
