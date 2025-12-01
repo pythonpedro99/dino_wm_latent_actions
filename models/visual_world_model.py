@@ -114,40 +114,119 @@ class VWorldModel(nn.Module):
             self.decoder.eval()
 
     def encode(self, obs, act):
+        # Encode observation
         z_dct = self.encode_obs(obs)
 
-        latent_actions = self.latent_action_model(z_dct["visual"])["action_patches"]
-        latent_actions = self.latent_action_down(latent_actions)
-        latent_actions = self.latent_action_norm(latent_actions)
-        latent_actions = torch.cat(
-            [latent_actions[:, 1:, :, :], latent_actions[:, -1:, :, :]],
+        # ----- latent actions (z_a, z_a_down, z_q) -----
+        # z_a: output of latent_action_model before downsampling
+        z_a = self.latent_action_model(z_dct["visual"])["action_patches"]           # (B, T, F?, A)
+        z_a_down = self.latent_action_down(z_a)                                     # (B, T, 1, A) typically
+
+        # Temporal shift / re-alignment as before
+        z_a_down_shifted = torch.cat(
+            [z_a_down[:, 1:, :, :], z_a_down[:, -1:, :, :]],
             dim=1
         )
 
-        vq_outputs = self.latent_vq_model(latent_actions)
-        quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)
-        vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)
+        vq_outputs = self.latent_vq_model(z_a_down_shifted)
+        quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)                  # z_q: (B, T, A)
+        vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)                    # (B, T)
 
-        proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))
+        proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))             # (B, T, 1, A_p)
 
+        # ----- concat modes -----
         if self.concat_dim == 0:
-            act_token = quantized_latent_actions.unsqueeze(2)
+            # concat along token-dim; use quantized actions as before
+            act_token = quantized_latent_actions.unsqueeze(2)                       # (B, T, 1, A)
             z = torch.cat([z_dct["visual"], proprio_token, act_token], dim=2)
 
-        if self.concat_dim == 1:
-            proprio_tiled = repeat(proprio_token, "b t 1 a -> b t f a", f=z_dct["visual"].shape[2])
+        elif self.concat_dim == 1:
+            # concat along feature-dim; gate between z_a_down and z_q per flag
+            proprio_tiled = repeat(
+                proprio_token, "b t 1 a -> b t f a",
+                f=z_dct["visual"].shape[2]
+            )
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
-            act_tiled = repeat(quantized_latent_actions.unsqueeze(2), "b t 1 a -> b t f a", f=z_dct["visual"].shape[2])
+
+            # decide which latent action representation to use
+            use_z_q = getattr(self, "use_z_q_in_concat", True)
+            if use_z_q:
+                act_base = quantized_latent_actions                                  # (B, T, A)
+            else:
+                act_base = z_a_down_shifted.squeeze(2)                               # (B, T, A) from z_a_down
+
+            act_tiled = repeat(
+                act_base.unsqueeze(2), "b t 1 a -> b t f a",
+                f=z_dct["visual"].shape[2]
+            )
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
-            z = torch.cat([z_dct['visual'], proprio_repeated, act_repeated], dim=3)
+
+            z = torch.cat([z_dct["visual"], proprio_repeated, act_repeated], dim=3)
+        else:
+            raise ValueError(f"Unsupported concat_dim: {self.concat_dim}")
+
+        # ----- stats every X steps -----
+        # hardcoded interval, using a self.counter as requested
+        LOG_INTERVAL = 100
+        if not hasattr(self, "counter"):
+            self.counter = 0
+        self.counter += 1
+
+        if self.counter % LOG_INTERVAL == 0:
+            with torch.no_grad():
+                stats = {}
+
+                def add_tensor_stats(name, t):
+                    # t can be 3D or 4D, we flatten everything except last dim
+                    # mean/std are scalar; dim_zero_frac is per-dimension
+                    t_flat = t.view(-1, t.shape[-1])
+                    stats[f"{name}_mean"] = t_flat.mean().item()
+                    stats[f"{name}_std"] = t_flat.std().item()
+                    dim_zero_frac = (t_flat == 0).float().mean(dim=0)                # (D,)
+                    stats[f"{name}_dim_zero_frac"] = dim_zero_frac.detach().cpu()
+
+                # z_a: pre-downsample, z_a_down: after downsample+shift, z_q: quantized
+                add_tensor_stats("z_a", z_a)
+                add_tensor_stats("z_a_down", z_a_down_shifted.squeeze(2))
+                add_tensor_stats("z_q", quantized_latent_actions)
+
+                # VQ loss (if present in outputs)
+                if "loss" in vq_outputs:
+                    stats["vq_loss"] = vq_outputs["loss"].detach().cpu()
+
+                # code usage statistics from indices
+                indices = vq_outputs["indices"]                                      # (B, T)
+                idx_flat = indices.view(-1)
+                # infer codebook size if not explicitly stored
+                codebook_size = getattr(
+                    self.latent_vq_model, "num_embeddings",
+                    int(idx_flat.max().item()) + 1
+                )
+                counts = torch.bincount(idx_flat, minlength=codebook_size)           # (num_codes,)
+                stats["code_counts"] = counts.detach().cpu()
+                stats["num_used_codes"] = int((counts > 0).sum().item())
+
+                # entropy over code distribution
+                total = counts.sum()
+                if total > 0:
+                    probs = counts.float() / total
+                    nonzero = probs > 0
+                    entropy = -(probs[nonzero] * probs[nonzero].log()).sum()
+                    stats["code_entropy"] = entropy.detach().cpu()
+                else:
+                    stats["code_entropy"] = torch.tensor(0.0)
+
+                # attach to vq_outputs so the caller can log them
+                vq_outputs["stats"] = stats
 
         return {
             "z": z,
             "vq_outputs": vq_outputs,
-            "latent_actions": latent_actions.squeeze(2),
-            "quantized_latent_actions": quantized_latent_actions,
-            "visual_embs": z_dct["visual"]
+            "latent_actions": z_a_down_shifted.squeeze(2),          # z_a_down (as before, but explicit)
+            "quantized_latent_actions": quantized_latent_actions,   # z_q
+            "visual_embs": z_dct["visual"],
         }
+
 
 
 
