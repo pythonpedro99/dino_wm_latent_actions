@@ -115,6 +115,7 @@ class VWorldModel(nn.Module):
             self.decoder.eval()
 
     def encode(self, obs, act):
+        
         z_dct = self.encode_obs(obs)  # z_dct["visual"]: (B, T, P, E)
         visual_tokens = z_dct["visual"]
         B, T, P, E = visual_tokens.shape
@@ -124,88 +125,114 @@ class VWorldModel(nn.Module):
         if not hasattr(self, "_collapse_debug_counter"):
             self._collapse_debug_counter = 0
 
-        # Log every 5th call (0, 5, 10, ...) – you can change 5 or add a max cap.
-        debug_this_call = (self._collapse_debug_counter % 5 == 0)
+        # Log every 100th call (0, 100, 200, ...)
+        debug_this_call = (self._collapse_debug_counter % 100 == 0)
         self._collapse_debug_counter += 1
 
-        def _log_stats(name, x: torch.Tensor):
+        def _summarize_stats(name, x: torch.Tensor):
             """
-            x: (B, T, ..., D) – we aggregate over all dims except the last (feature dim).
+            x: (B, T, ..., D)
+            We aggregate over all dims except the last (feature dim) and then
+            summarize per-dim statistics in a compact way.
             """
             with torch.no_grad():
-                # std/mean over all but last dim
-                dims = tuple(range(x.dim() - 1))
-                mean = x.mean(dim=dims)
-                std = x.std(dim=dims)
+                dims = tuple(range(x.dim() - 1))          # average over batch/time/whatever
+                per_dim_mean = x.mean(dim=dims)          # (D,)
+                per_dim_std  = x.std(dim=dims)           # (D,)
 
-                # how many dims are effectively "collapsed"
-                near_zero = (std < 1e-5).sum().item()
-                total = std.numel()
+                mean_mu = per_dim_mean.mean().item()
+                mean_sigma = per_dim_mean.std().item()
+                std_mu = per_dim_std.mean().item()
+                std_sigma = per_dim_std.std().item()
 
-                # Print first 10 dims for readability
-                print(f"{name} mean (first 10): {mean[:10].detach().cpu()}")
-                print(f"{name} std  (first 10): {std[:10].detach().cpu()}")
-                print(f"{name} near-zero-std dims: {near_zero}/{total}")
+                near_zero = (per_dim_std < 1e-4).float().mean().item()  # fraction of dims
+
+                print(
+                    f"[{name}] "
+                    f"mean μ={mean_mu:.4f}±{mean_sigma:.4f}, "
+                    f"std μ={std_mu:.4f}±{std_sigma:.4f}, "
+                    f"near_zero={near_zero*100:.1f}%"
+                )
 
         if debug_this_call:
             with torch.no_grad():
-                # Also log real action stats as a baseline
-                # assuming act: (B, T, A)
+                # Also log real action stats as a baseline (if provided)
                 if act is not None:
                     if act.dim() == 3:
-                        dims = (0, 1)
+                        dims = (0, 1)  # (B, T, A)
                     else:
                         dims = tuple(range(act.dim() - 1))
                     act_mean = act.mean(dim=dims)
                     act_std = act.std(dim=dims)
-                    print("Decoder training targets stats (actions):")
-                    print("act mean (first 10):", act_mean[:10].detach().cpu())
-                    print("act std  (first 10):", act_std[:10].detach().cpu())
+                    print("=== Action baseline stats ===")
+                    print(
+                        f"[actions] "
+                        f"mean μ={act_mean.mean().item():.4f}±{act_mean.std().item():.4f}, "
+                        f"std μ={act_std.mean().item():.4f}±{act_std.std().item():.4f}"
+                    )
 
         # ====== 1) SP-Transformer: action_patches ======
         latent_actions = self.latent_action_model(visual_tokens)["action_patches"]  # (B, T, 1, E)
         if debug_this_call:
-            _log_stats("action_patches (SP-Transformer out)", latent_actions)
+            _summarize_stats("action_patches (SP-Transformer out)", latent_actions)
 
         # ====== 2) Down-projection ======
         latent_actions = self.latent_action_down(latent_actions)  # (B, T, 1, latent_dim)
         if debug_this_call:
-            _log_stats("latent_actions after down-projection", latent_actions)
+            _summarize_stats("latent_actions after down-projection", latent_actions)
 
-        # ====== 3) LayerNorm ======
+        # ====== 3) (optional) LayerNorm ======
         latent_actions = self.latent_action_norm(latent_actions)  # (B, T, 1, latent_dim)
-        if debug_this_call:
-            _log_stats("latent_actions after LayerNorm (z_a pre-shift)", latent_actions)
+        # If you decide LN is removed, just comment out the line above.
+        # You probably don't need separate stats *after* LN anymore.
 
         # ====== 4) Temporal shift / repeat last frame ======
         latent_actions = torch.cat(
             [latent_actions[:, 1:, :, :], latent_actions[:, -1:, :, :]],
             dim=1
-        )  # still (B, T, 1, latent_dim)
-        if debug_this_call:
-            _log_stats("latent_actions after temporal shift", latent_actions)
+        )  # (B, T, 1, latent_dim)
         latent_actions = latent_actions.squeeze(2)  # (B, T, latent_dim)
+
         # ====== 5) VQ ======
-        vq_outputs = self.latent_vq_model(latent_actions)  # expects (B, T, 1, D)
-        quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)  # (B, T, D)
-        vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)    # (B, T)
+        vq_outputs = self.latent_vq_model(latent_actions)  # (B, T, D) expected here
+        quantized_latent_actions = vq_outputs["z_q_st"]      # (B, T, D)
+        vq_outputs["indices"] = vq_outputs["indices"]        # (B, T)
 
         if debug_this_call:
-            # Stats for z_q
-            _log_stats("z_q (quantized_latent_actions)", quantized_latent_actions)
+            print("=== VQ / z_q stats ===")
+            _summarize_stats("z_q (quantized_latent_actions)", quantized_latent_actions)
 
-            # VQ code usage
             with torch.no_grad():
-                indices = vq_outputs["indices"]  # (B, T)
+                # VQ loss
+                if "loss" in vq_outputs and vq_outputs["loss"] is not None:
+                    print(f"[VQ] loss = {vq_outputs['loss'].item():.6f}")
+
+                # Code usage
+                indices = vq_outputs["indices"].view(-1)  # (B*T,)
                 unique, counts = indices.unique(return_counts=True)
-                print(f"VQ: num unique codes used: {unique.numel()}")
-                top_k = min(10, unique.numel())
-                print("VQ: top codes (code, count):", list(zip(
-                    unique[:top_k].tolist(),
-                    counts[:top_k].tolist()
-                )))
-                if hasattr(self.latent_vq_model, "num_codes"):
-                    print(f"VQ: total available codes: {self.latent_vq_model.num_codes}")
+                num_used = unique.numel()
+                num_codes = getattr(self.latent_vq_model, "num_codes", None)
+
+                if num_codes is not None:
+                    usage_frac = num_used / float(num_codes)
+                    header = f"[VQ] codes used: {num_used}/{num_codes} ({usage_frac*100:.1f}%)"
+                else:
+                    header = f"[VQ] codes used: {num_used}"
+
+                print(header)
+
+                # Top few codes
+                top_k = min(5, num_used)
+                # sort by count descending
+                counts_sorted, idx_sorted = counts.sort(descending=True)
+                unique_sorted = unique[idx_sorted]
+                top_codes = list(
+                    zip(
+                        unique_sorted[:top_k].tolist(),
+                        counts_sorted[:top_k].tolist()
+                    )
+                )
+                print(f"[VQ] top codes (code, count): {top_codes}")
 
         # ====== 6) Build z with proprio + action token ======
         proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))  # (B, T, 1, P_proprio)
@@ -219,17 +246,15 @@ class VWorldModel(nn.Module):
             proprio_tiled = repeat(
                 proprio_token, "b t 1 a -> b t f a", f=z_dct["visual"].shape[2]
             )
-            proprio_repeated = proprio_tiled.repeat(
-                1, 1, 1, self.num_proprio_repeat
-            )
+            proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
+
             act_tiled = repeat(
-                latent_actions.unsqueeze(2),
+                latent_actions.unsqueeze(2),  # NOTE: uses pre-quant z_a as features here
                 "b t 1 a -> b t f a",
                 f=z_dct["visual"].shape[2],
             )
-            act_repeated = act_tiled.repeat(
-                1, 1, 1, self.num_action_repeat
-            )
+            act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
+
             z = torch.cat([z_dct["visual"], proprio_repeated, act_repeated], dim=3)
         else:
             raise ValueError(f"Unknown concat_dim={self.concat_dim}")
@@ -237,10 +262,11 @@ class VWorldModel(nn.Module):
         return {
             "z": z,
             "vq_outputs": vq_outputs,
-            "latent_actions": latent_actions.squeeze(2),           # (B, T, D)
+            "latent_actions": latent_actions,              # (B, T, D)
             "quantized_latent_actions": quantized_latent_actions,  # (B, T, D)
-            "visual_embs": z_dct["visual"],                        # (B, T, P, E)
+            "visual_embs": z_dct["visual"],                # (B, T, P, E)
         }
+
 
 
 
