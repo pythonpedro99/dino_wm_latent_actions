@@ -77,7 +77,7 @@ model:
   codebook_splits: 5
   codebook_dim: 2  # latent_action_dim = codebook_splits * codebook_dim
   latent_action_dim: 10
-  commitment: 0.25
+  commitment: 0.0
   ema_decay: 0.99
 
 debug: False 
@@ -92,7 +92,7 @@ plan_settings:
   alpha: [0.1, 1]
 
 metrics:
-  enabled: True
+  enabled: False
   max_samples: 4096
   mi_k: 5
   knn_k: 10
