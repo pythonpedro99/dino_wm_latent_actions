@@ -585,6 +585,14 @@ class Trainer:
 
             loss = self.accelerator.gather_for_metrics(loss).mean()
 
+            # --- simple loss log every 100 steps -------------------------------  # <<< added
+            if i % 100 == 0:
+                self.accelerator.print(
+                    f"[Epoch {self.epoch} | Step {i}] "
+                    f"train_prediction_loss = {loss.item():.4f}"
+                )
+            # --------------------------------------------------------------------  # <<< added
+
             loss_components = self.accelerator.gather_for_metrics(loss_components)
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
@@ -649,6 +657,7 @@ class Trainer:
 
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
+
 
     def val(self):
         self.model.eval()

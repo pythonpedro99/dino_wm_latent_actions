@@ -115,7 +115,7 @@ class VWorldModel(nn.Module):
             self.decoder.eval()
 
     def encode(self, obs, act):
-        
+
         z_dct = self.encode_obs(obs)  # z_dct["visual"]: (B, T, P, E)
         visual_tokens = z_dct["visual"]
         B, T, P, E = visual_tokens.shape
@@ -182,7 +182,7 @@ class VWorldModel(nn.Module):
             _summarize_stats("latent_actions after down-projection", latent_actions)
 
         # ====== 3) (optional) LayerNorm ======
-        latent_actions = self.latent_action_norm(latent_actions)  # (B, T, 1, latent_dim)
+        #latent_actions = self.latent_action_norm(latent_actions)  # (B, T, 1, latent_dim)
         # If you decide LN is removed, just comment out the line above.
         # You probably don't need separate stats *after* LN anymore.
 
