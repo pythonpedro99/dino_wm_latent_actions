@@ -149,7 +149,7 @@ class VWorldModel(nn.Module):
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
 
             # decide which latent action representation to use
-            use_z_q = getattr(self, "use_z_q_in_concat", True)
+            use_z_q = getattr(self, "use_z_q_in_concat", False)
             if use_z_q:
                 act_base = quantized_latent_actions                                  # (B, T, A)
             else:
