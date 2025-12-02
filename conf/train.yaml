@@ -32,7 +32,7 @@ hydra:
 training:
   seed: 0
   epochs: 1
-  batch_size: 14 # should >= nodes * tasks_per_node
+  batch_size: 24 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
   log_train_error_every_x_steps: 200
