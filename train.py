@@ -68,6 +68,11 @@ class Trainer:
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
         self.total_epochs = self.cfg.training.epochs
         self.epoch = 0
+        self.global_step = 0
+        self.log_train_error_every_x_steps = (
+            self.cfg.training.log_train_error_every_x_steps
+        )
+        self.val_every_x_steps = self.cfg.training.val_every_x_steps
 
         assert cfg.training.batch_size % self.accelerator.num_processes == 0, (
             "Batch size must be divisible by the number of processes. "
@@ -374,8 +379,12 @@ class Trainer:
             self.accelerator.wait_for_everyone()
             self.train()
             self.accelerator.wait_for_everyone()
-            self.val()
-            self.logs_flash(step=self.epoch)
+            if self.val_every_x_steps <= 0:
+                self.val()
+                self.logs_flash(step=self.epoch)
+            else:
+                self.val()
+                self.logs_flash(step=self.global_step)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
                 ckpt_path, model_name, model_epoch = self.save_ckpt()
                 # main thread only: launch planning jobs on the saved ckpt
@@ -443,6 +452,7 @@ class Trainer:
         for i, data in enumerate(
             tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
         ):
+            self.global_step += 1
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
             self.model.train()
@@ -473,6 +483,15 @@ class Trainer:
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
+            if (
+                self.log_train_error_every_x_steps > 0
+                and self.global_step % self.log_train_error_every_x_steps == 0
+                and self.cfg.has_predictor
+            ):
+                self.log_train_errors(z_out, obs)
+            if self.val_every_x_steps > 0 and self.global_step % self.val_every_x_steps == 0:
+                self.val()
+                self.logs_flash(step=self.global_step)
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
@@ -718,6 +737,19 @@ class Trainer:
             key: sum(values) / len(values) for key, values in logs.items() if values
         }
         return logs
+
+    def log_train_errors(self, z_out, obs):
+        z_obs_out, _ = self.model.separate_emb(z_out)
+        z_gt = self.model.encode_obs(obs)
+        z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
+
+        err_logs = self.err_eval(z_obs_out, z_tgt)
+
+        err_logs = self.accelerator.gather_for_metrics(err_logs)
+        err_logs = {key: value.mean().item() for key, value in err_logs.items()}
+        err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
+
+        self.logs_update(err_logs)
 
     def logs_update(self, logs):
         for key, value in logs.items():
