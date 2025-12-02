@@ -593,7 +593,6 @@ class Trainer:
             loss_scalar = loss.item()
             if self.accelerator.is_local_main_process:
                 train_bar.set_postfix({"train_loss": f"{loss_scalar:.4f}"})
-            self.global_step += 1
             if not self.val_every_x_steps or self.global_step % self.val_every_x_steps == 0:
                 self.accelerator.print(
                     f"Epoch {self.epoch} Step {self.global_step}: train_loss={loss_scalar:.4f}"
