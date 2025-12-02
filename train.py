@@ -749,6 +749,15 @@ class Trainer:
         err_logs = {key: value.mean().item() for key, value in err_logs.items()}
         err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
 
+        # Print train error metrics directly to stdout for visibility.
+        printable_logs = ", ".join(
+            f"{key}={values[0]:.4f}" for key, values in err_logs.items()
+        )
+        print(
+            f"[step {self.global_step}] Train embedding errors: {printable_logs}",
+            flush=True,
+        )
+
         self.logs_update(err_logs)
 
     def logs_update(self, logs):
@@ -769,8 +778,15 @@ class Trainer:
             to_log = sum / count
             epoch_log[key] = to_log
         epoch_log["epoch"] = step
-        log.info(f"Epoch {self.epoch}  Training loss: {epoch_log['train_loss']:.4f}  \
-                Validation loss: {epoch_log['val_loss']:.4f}")
+        metrics_msg = ", ".join(
+            f"{k}={v:.4f}" if isinstance(v, (float, int)) else f"{k}={v}"
+            for k, v in epoch_log.items()
+            if k != "epoch"
+        )
+        print(
+            f"[step {step}] Aggregated metrics (epoch {self.epoch}): {metrics_msg}",
+            flush=True,
+        )
 
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
