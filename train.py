@@ -86,6 +86,7 @@ class Trainer:
 
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
+            self._setup_step_logger()
             wandb_run_id = None
             if os.path.exists("hydra.yaml"):
                 existing_cfg = OmegaConf.load("hydra.yaml")
@@ -177,6 +178,22 @@ class Trainer:
         self.init_optimizers()
 
         self.epoch_log = OrderedDict()
+
+    def _setup_step_logger(self):
+        self.step_logger = logging.getLogger("train_step_logger")
+        self.step_logger.setLevel(logging.INFO)
+        if self.step_logger.handlers:
+            return
+
+        formatter = logging.Formatter("%(asctime)s - %(message)s")
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        self.step_logger.addHandler(stream_handler)
+
+        log_file = Path(os.getcwd()) / "training.log"
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        self.step_logger.addHandler(file_handler)
 
     def save_ckpt(self):
         self.accelerator.wait_for_everyone()
@@ -450,7 +467,11 @@ class Trainer:
 
     def train(self):
         for i, data in enumerate(
-            tqdm(self.dataloaders["train"], desc=f"Epoch {self.epoch} Train")
+            tqdm(
+                self.dataloaders["train"],
+                desc=f"Epoch {self.epoch} Train",
+                disable=not self.accelerator.is_main_process,
+            )
         ):
             self.global_step += 1
             obs, act, state = data
@@ -572,7 +593,11 @@ class Trainer:
 
         self.accelerator.wait_for_everyone()
         for i, data in enumerate(
-            tqdm(self.dataloaders["valid"], desc=f"Epoch {self.epoch} Valid")
+            tqdm(
+                self.dataloaders["valid"],
+                desc=f"Epoch {self.epoch} Valid",
+                disable=not self.accelerator.is_main_process,
+            )
         ):
             obs, act, state = data
             plot = i == 0
@@ -753,9 +778,8 @@ class Trainer:
         printable_logs = ", ".join(
             f"{key}={values[0]:.4f}" for key, values in err_logs.items()
         )
-        print(
-            f"[step {self.global_step}] Train embedding errors: {printable_logs}",
-            flush=True,
+        self._log_step_message(
+            f"[step {self.global_step}] Train embedding errors: {printable_logs}"
         )
 
         self.logs_update(err_logs)
@@ -783,14 +807,20 @@ class Trainer:
             for k, v in epoch_log.items()
             if k != "epoch"
         )
-        print(
-            f"[step {step}] Aggregated metrics (epoch {self.epoch}): {metrics_msg}",
-            flush=True,
+        self._log_step_message(
+            f"[step {step}] Aggregated metrics (epoch {self.epoch}): {metrics_msg}"
         )
 
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
         self.epoch_log = OrderedDict()
+
+    def _log_step_message(self, message: str):
+        if self.accelerator.is_main_process:
+            if hasattr(self, "step_logger"):
+                self.step_logger.info(message)
+            else:
+                print(message, flush=True)
 
     def plot_samples(
         self,
