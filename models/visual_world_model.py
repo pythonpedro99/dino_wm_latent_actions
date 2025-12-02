@@ -422,7 +422,7 @@ class VWorldModel(nn.Module):
 
         z = encode_output["z"][:, :num_obs_init]
         act = self.encode_act(act)
-        action = act #quantized_latent_actions[:, num_obs_init:]
+        action = act[:, num_obs_init:]
 
         t = 0
         inc = 1
