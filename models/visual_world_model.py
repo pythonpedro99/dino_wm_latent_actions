@@ -99,6 +99,8 @@ class VWorldModel(nn.Module):
             z = torch.cat(
                     [z_dct['visual'], z_dct['proprio'].unsqueeze(2), act_emb.unsqueeze(2)], dim=2 # add as an extra token
                 )  # (b, num_frames, num_patches + 2, dim)
+            
+        proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))
         if self.concat_dim == 1:
             proprio_tiled = repeat(z_dct['proprio'].unsqueeze(2), "b t 1 a -> b t f a", f=z_dct['visual'].shape[2])
             proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
