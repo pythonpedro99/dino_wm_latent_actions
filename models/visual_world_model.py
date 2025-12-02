@@ -116,6 +116,7 @@ class VWorldModel(nn.Module):
     def encode(self, obs, act):
         # Encode observation
         z_dct = self.encode_obs(obs)
+        act = self.encode_act(act)
 
         # ----- latent actions (z_a, z_a_down, z_q) -----
         # z_a: output of latent_action_model before downsampling
@@ -153,7 +154,7 @@ class VWorldModel(nn.Module):
             if use_z_q:
                 act_base = quantized_latent_actions                                  # (B, T, A)
             else:
-                act_base = z_a_down_shifted.squeeze(2)                               # (B, T, A) from z_a_down
+                act_base = act #z_a_down_shifted.squeeze(2)                               # (B, T, A) from z_a_down
 
             act_tiled = repeat(
                 act_base.unsqueeze(2), "b t 1 a -> b t f a",

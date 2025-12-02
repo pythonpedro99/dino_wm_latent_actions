@@ -665,7 +665,7 @@ class Trainer:
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
 
-            if self.val_every_x_steps and self.global_step % self.val_every_x_steps == 0:
+            if self.val_every_x_steps and self.global_step % (self.val_every_x_steps * 20) == 0:
                 self.accelerator.wait_for_everyone()
                 self.val()
                 self.logs_flash(step=self.global_step, use_segment=True)
