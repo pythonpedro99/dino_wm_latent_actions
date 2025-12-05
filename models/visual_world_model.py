@@ -94,8 +94,8 @@ class VWorldModel(nn.Module):
         output:    z (tensor): (b, num_frames, num_patches, emb_dim)
         """
         z_dct = self.encode_obs(obs)
-        #act_emb = self.encode_act(act)
-        act_emb = torch.zeros_like(self.encode_act(act))
+        act_emb = self.encode_act(act)
+        #act_emb = torch.zeros_like(self.encode_act(act))
 
         if self.concat_dim == 0:
             z = torch.cat(
