@@ -471,6 +471,7 @@ class Trainer:
                 self.dataloaders["train"],
                 desc=f"Epoch {self.epoch} Train",
                 disable=not self.accelerator.is_main_process,
+                position=0,
             )
         ):
             self.global_step += 1
@@ -597,6 +598,8 @@ class Trainer:
                 self.dataloaders["valid"],
                 desc=f"Epoch {self.epoch} Valid",
                 disable=not self.accelerator.is_main_process,
+                position=1,
+                leave=False,
             )
         ):
             obs, act, state = data
