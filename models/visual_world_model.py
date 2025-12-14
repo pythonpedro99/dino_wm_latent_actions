@@ -154,7 +154,7 @@ class VWorldModel(nn.Module):
             if use_z_q:
                 act_base = quantized_latent_actions                                  # (B, T, A)
             else:
-                act_base = act #z_a_down_shifted.squeeze(2)                               # (B, T, A) from z_a_down
+                act_base = z_a_down_shifted.squeeze(2)                               # (B, T, A) from z_a_down
 
             act_tiled = repeat(
                 act_base.unsqueeze(2), "b t 1 a -> b t f a",
@@ -168,7 +168,7 @@ class VWorldModel(nn.Module):
 
         # ----- stats every X steps -----
         # hardcoded interval, using a self.counter as requested
-        LOG_INTERVAL = 100
+        LOG_INTERVAL = 50
         if not hasattr(self, "counter"):
             self.counter = 0
         self.counter += 1
@@ -418,10 +418,10 @@ class VWorldModel(nn.Module):
             z_obses, z
         """
         encode_output = self.encode(obs, act)
-        quantized_latent_actions = encode_output["quantized_latent_actions"]
+        latent_actions = encode_output["latent_actions"]  # (b, t+n, latent_action_dim)
 
         z = encode_output["z"][:, :num_obs_init]
-        act = self.encode_act(act)
+        act = latent_actions #self.encode_act(act)
         action = act[:, num_obs_init:]
 
         t = 0
