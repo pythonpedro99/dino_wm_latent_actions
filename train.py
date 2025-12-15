@@ -686,6 +686,8 @@ class Trainer:
 
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
+            if self.log_every_x_steps > 0 and self.global_step % self.log_every_x_steps == 0:
+               self.logs_flash(step=self.global_step)
 
     def val(self):
         self.model.eval()
