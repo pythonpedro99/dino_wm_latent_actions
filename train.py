@@ -75,6 +75,7 @@ class Trainer:
         self.epoch = 0
         self.global_step = 0
         self.val_every_x_steps = getattr(self.cfg.training, "val_every_x_steps", 0)
+        self.log_every_x_steps = getattr(self.cfg.training, "log_every_x_steps", 0)
 
         assert cfg.training.batch_size % self.accelerator.num_processes == 0, (
             "Batch size must be divisible by the number of processes. "
@@ -196,6 +197,7 @@ class Trainer:
 
         self.epoch_log = OrderedDict()
         self.segment_log = OrderedDict()
+        self._setup_training_file_logger()
 
     def save_ckpt(self):
         self.accelerator.wait_for_everyone()
@@ -551,12 +553,18 @@ class Trainer:
             disable=not self.accelerator.is_local_main_process,
         )
         for i, data in enumerate(train_bar):
+            file_log_metrics = {"train_loss": None}
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
             self.model.train()
-            z_out, visual_out, visual_reconstructed, loss, loss_components, _ = self.model(
-                obs, act
-            )
+            (
+                z_out,
+                visual_out,
+                visual_reconstructed,
+                loss,
+                loss_components,
+                encode_output,
+            ) = self.model(obs, act)
 
             self.encoder_optimizer.zero_grad()
             if self.cfg.has_decoder:
@@ -603,6 +611,14 @@ class Trainer:
                 key: value.mean().item() for key, value in loss_components.items()
             }
             self.global_step += 1
+            file_log_metrics["train_loss"] = loss_scalar
+
+            encode_stats = None
+            if isinstance(encode_output, dict):
+                vq_outputs = encode_output.get("vq_outputs", {})
+                encode_stats = vq_outputs.get("stats")
+            if encode_stats:
+                file_log_metrics.update({f"encode_{k}": v for k, v in encode_stats.items()})
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
@@ -618,6 +634,10 @@ class Trainer:
                         key: value.mean().item() for key, value in err_logs.items()
                     }
                     err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
+
+                    file_log_metrics.update(
+                        {key: values[0] for key, values in err_logs.items()}
+                    )
 
                     self.logs_update(err_logs)
 
@@ -662,6 +682,9 @@ class Trainer:
                 )
 
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
+            file_log_metrics.update(
+                {f"train_{k}": values[0] for k, values in loss_components.items()}
+            )
             self.logs_update(loss_components)
 
             if self.val_every_x_steps and self.global_step % self.val_every_x_steps == 0:
@@ -670,10 +693,17 @@ class Trainer:
                     self.val()
                 self.logs_flash(step=self.global_step, use_segment=True)
 
+            if self.log_every_x_steps and self.global_step % self.log_every_x_steps == 0:
+                metrics_to_log = {k: v for k, v in file_log_metrics.items() if v is not None}
+                self._log_metrics_to_file(
+                    step=self.global_step, phase="train", metrics=metrics_to_log
+                )
+
     def val(self):
         self.model.eval()
         if self.latent_metric_analyzer is not None and self.accelerator.is_main_process:
             self.latent_metric_analyzer.reset()
+        val_file_metrics = []
         if len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
             with torch.no_grad():
                 train_rollout_logs = self.openloop_rollout(
@@ -682,11 +712,17 @@ class Trainer:
                 train_rollout_logs = {
                     f"train_{k}": [v] for k, v in train_rollout_logs.items()
                 }
+                val_file_metrics.append(
+                    {key: float(values[0]) for key, values in train_rollout_logs.items()}
+                )
                 self.logs_update(train_rollout_logs)
                 val_rollout_logs = self.openloop_rollout(self.val_traj_dset, mode="val")
                 val_rollout_logs = {
                     f"val_{k}": [v] for k, v in val_rollout_logs.items()
                 }
+                val_file_metrics.append(
+                    {key: float(values[0]) for key, values in val_rollout_logs.items()}
+                )
                 self.logs_update(val_rollout_logs)
 
         self.accelerator.wait_for_everyone()
@@ -701,11 +737,14 @@ class Trainer:
             )
 
             loss = self.accelerator.gather_for_metrics(loss).mean()
+            loss_scalar = loss.item()
 
             loss_components = self.accelerator.gather_for_metrics(loss_components)
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
+            batch_file_metrics = {"val_loss": loss_scalar}
+            batch_file_metrics.update({f"val_{k}": v for k, v in loss_components.items()})
 
             self.update_latent_metrics(
                 encode_output=encode_output,
@@ -728,6 +767,10 @@ class Trainer:
                         key: value.mean().item() for key, value in err_logs.items()
                     }
                     err_logs = {f"val_{k}": [v] for k, v in err_logs.items()}
+
+                    batch_file_metrics.update(
+                        {key: values[0] for key, values in err_logs.items()}
+                    )
 
                     self.logs_update(err_logs)
 
@@ -772,6 +815,7 @@ class Trainer:
                 )
             loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
+            val_file_metrics.append(batch_file_metrics)
 
         if (
             self.latent_metric_analyzer is not None
@@ -786,6 +830,7 @@ class Trainer:
                 if math.isnan(value):
                     continue
                 self.logs_update({f"val_{key}": [float(value)]})
+                val_file_metrics.append({f"val_{key}": float(value)})
             if self.wandb_run is not None:
                 for fig_name, fig in latent_figs.items():
                     if fig is None:
@@ -794,6 +839,11 @@ class Trainer:
                         {f"val_{fig_name}": wandb.Image(fig), "epoch": self.epoch}
                     )
                     plt.close(fig)
+
+        aggregated_val_metrics = self._aggregate_metric_dicts(val_file_metrics)
+        self._log_metrics_to_file(
+            step=self.global_step, phase="val", metrics=aggregated_val_metrics
+        )
 
     def openloop_rollout(
             self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
@@ -878,6 +928,74 @@ class Trainer:
         }
         return logs
 
+
+    def _setup_training_file_logger(self):
+        self.training_log_path = Path(os.getcwd()) / "training.log"
+        self.training_file_logger = logging.getLogger("training_file_logger")
+        self.training_file_logger.setLevel(logging.INFO)
+        self.training_file_logger.propagate = False
+
+        existing_handlers = [
+            handler
+            for handler in self.training_file_logger.handlers
+            if isinstance(handler, logging.FileHandler)
+            and getattr(handler, "baseFilename", None)
+            == str(self.training_log_path)
+        ]
+        if not existing_handlers:
+            file_handler = logging.FileHandler(self.training_log_path, mode="a")
+            formatter = logging.Formatter(
+                fmt="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+            )
+            file_handler.setFormatter(formatter)
+            self.training_file_logger.addHandler(file_handler)
+
+    def _aggregate_metric_dicts(self, metrics_list):
+        if not metrics_list:
+            return {}
+
+        aggregated = {}
+        counts = {}
+        for metrics in metrics_list:
+            for key, value in metrics.items():
+                aggregated[key] = aggregated.get(key, 0.0) + float(value)
+                counts[key] = counts.get(key, 0) + 1
+        return {key: aggregated[key] / counts[key] for key in aggregated}
+
+    def _format_metric_value(self, value):
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu()
+            if value.numel() == 1:
+                return f"{value.item():.6f}"
+            return "[" + ", ".join(f"{v:.6f}" for v in value.flatten().tolist()) + "]"
+        if isinstance(value, np.ndarray):
+            if value.size == 1:
+                return f"{float(value):.6f}"
+            return "[" + ", ".join(f"{v:.6f}" for v in value.flatten().tolist()) + "]"
+        if isinstance(value, (list, tuple)):
+            if len(value) == 1 and isinstance(value[0], numbers.Number):
+                return f"{value[0]:.6f}"
+            return "[" + ", ".join(str(v) for v in value) + "]"
+        if isinstance(value, numbers.Number):
+            return f"{value:.6f}"
+        return str(value)
+
+    def _log_metrics_to_file(self, step, phase, metrics):
+        if not self.accelerator.is_main_process or not metrics:
+            return
+
+        formatted_pairs = []
+        for key, value in metrics.items():
+            try:
+                formatted_value = self._format_metric_value(value)
+            except Exception:
+                formatted_value = str(value)
+            formatted_pairs.append(f"{key}={formatted_value}")
+
+        metrics_str = "  ".join(formatted_pairs)
+        self.training_file_logger.info(
+            "Epoch %s Step %s [%s] %s", self.epoch, step, phase, metrics_str
+        )
 
     def logs_update(self, logs):
         for key, value in logs.items():
