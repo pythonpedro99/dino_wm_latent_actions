@@ -608,23 +608,17 @@ class Trainer:
             }
 
             if (
-                self.log_train_error_every_x_steps > 0
-                and self.global_step % self.log_train_error_every_x_steps == 0
+                self.log_every_x_steps > 0
+                and self.global_step % self.log_every_x_steps == 0
                 and self.cfg.has_predictor
             ):
                 self.log_train_errors(z_out, obs)
+
             if self.val_every_x_steps > 0 and self.global_step % self.val_every_x_steps == 0:
                 self.val()
                 self.logs_flash(step=self.global_step)
 
-            # if isinstance(encode_output, dict):
-            #     vq_outputs = encode_output.get("vq_outputs", {})
-            #     encode_stats = vq_outputs.get("stats")
-            #     if encode_stats:
-            #         encode_stats = {
-            #             f"train_encode_{k}": [v] for k, v in encode_stats.items()
-            #         }
-            #         self.logs_update(encode_stats)
+
 
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
@@ -686,8 +680,6 @@ class Trainer:
 
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
-            if self.log_every_x_steps > 0 and self.global_step % self.log_every_x_steps == 0:
-               self.logs_flash(step=self.global_step)
 
     def val(self):
         self.model.eval()
