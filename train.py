@@ -935,6 +935,11 @@ class Trainer:
             f"[step {self.global_step}] Train embedding errors: {printable_logs}"
         )
 
+        metrics_for_file = {key: values[0] for key, values in err_logs.items()}
+        self._log_metrics_to_file(
+            step=self.global_step, phase="train_errors", metrics=metrics_for_file
+        )
+
         self.logs_update(err_logs)
 
 
@@ -955,6 +960,8 @@ class Trainer:
         file_handler = logging.FileHandler(log_file)
         file_handler.setFormatter(formatter)
         self.step_logger.addHandler(file_handler)
+
+        self.training_file_logger = self.step_logger
 
 
     def _aggregate_metric_dicts(self, metrics_list):
