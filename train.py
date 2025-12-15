@@ -76,6 +76,9 @@ class Trainer:
         self.global_step = 0
         self.val_every_x_steps = getattr(self.cfg.training, "val_every_x_steps", 0)
         self.log_every_x_steps = getattr(self.cfg.training, "log_every_x_steps", 0)
+        self.log_train_error_every_x_steps = getattr(
+            self.cfg.training, "log_train_error_every_x_steps", 0
+        )
 
         assert cfg.training.batch_size % self.accelerator.num_processes == 0, (
             "Batch size must be divisible by the number of processes. "
@@ -196,8 +199,8 @@ class Trainer:
         self.init_optimizers()
 
         self.epoch_log = OrderedDict()
-        self.segment_log = OrderedDict()
         self._setup_training_file_logger()
+        self.step_logger = getattr(self, "training_file_logger", None)
 
     def save_ckpt(self):
         self.accelerator.wait_for_everyone()
@@ -481,8 +484,12 @@ class Trainer:
             self.accelerator.wait_for_everyone()
             self.train()
             self.accelerator.wait_for_everyone()
-            self.val()
-            self.logs_flash(step=self.epoch)
+            if self.val_every_x_steps <= 0:
+                self.val()
+                self.logs_flash(step=self.epoch)
+            else:
+                self.val()
+                self.logs_flash(step=self.global_step)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
                 ckpt_path, model_name, model_epoch = self.save_ckpt()
                 # main thread only: launch planning jobs on the saved ckpt
@@ -547,13 +554,15 @@ class Trainer:
         return logs
 
     def train(self):
-        train_bar = tqdm(
-            self.dataloaders["train"],
-            desc=f"Epoch {self.epoch} Train",
-            disable=not self.accelerator.is_local_main_process,
-        )
-        for i, data in enumerate(train_bar):
-            file_log_metrics = {"train_loss": None}
+        for i, data in enumerate(
+            tqdm(
+                self.dataloaders["train"],
+                desc=f"Epoch {self.epoch} Train",
+                disable=not self.accelerator.is_main_process,
+                position=0,
+            )
+        ):
+            self.global_step += 1
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
             self.model.train()
@@ -576,16 +585,10 @@ class Trainer:
 
             vq_loss = loss_components.get("vq_loss")
             retain_graph = vq_loss is not None
-            # VQ loss is returned separately by the model, so prediction_loss
-            # contains only the terms meant to drive the predictor/decoder.
             prediction_loss = loss
 
             self.accelerator.backward(prediction_loss, retain_graph=retain_graph)
             if vq_loss is not None:
-                # vq_loss is produced inside encode(), i.e. before the predictor
-                # is ever called, so this backward only touches the encoder plus
-                # the latent modules.  That means the predictor optimizer never
-                # receives commitment gradients even though we reuse the same graph.
                 self.accelerator.backward(vq_loss)
 
             if self.model.train_encoder:
@@ -598,27 +601,30 @@ class Trainer:
             self.latent_optimizer.step()
 
             loss = self.accelerator.gather_for_metrics(loss).mean()
-            loss_scalar = loss.item()
-            if self.accelerator.is_local_main_process:
-                train_bar.set_postfix({"train_loss": f"{loss_scalar:.4f}"})
-            if not self.val_every_x_steps or self.global_step % self.val_every_x_steps == 0:
-                self.accelerator.print(
-                    f"Epoch {self.epoch} Step {self.global_step}: train_loss={loss_scalar:.4f}"
-                )
-
             loss_components = self.accelerator.gather_for_metrics(loss_components)
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
-            self.global_step += 1
-            file_log_metrics["train_loss"] = loss_scalar
 
-            encode_stats = None
+            if (
+                self.log_train_error_every_x_steps > 0
+                and self.global_step % self.log_train_error_every_x_steps == 0
+                and self.cfg.has_predictor
+            ):
+                self.log_train_errors(z_out, obs)
+            if self.val_every_x_steps > 0 and self.global_step % self.val_every_x_steps == 0:
+                self.val()
+                self.logs_flash(step=self.global_step)
+
             if isinstance(encode_output, dict):
                 vq_outputs = encode_output.get("vq_outputs", {})
                 encode_stats = vq_outputs.get("stats")
-            if encode_stats:
-                file_log_metrics.update({f"encode_{k}": v for k, v in encode_stats.items()})
+                if encode_stats:
+                    encode_stats = {
+                        f"train_encode_{k}": [v] for k, v in encode_stats.items()
+                    }
+                    self.logs_update(encode_stats)
+
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
@@ -634,10 +640,6 @@ class Trainer:
                         key: value.mean().item() for key, value in err_logs.items()
                     }
                     err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
-
-                    file_log_metrics.update(
-                        {key: values[0] for key, values in err_logs.items()}
-                    )
 
                     self.logs_update(err_logs)
 
@@ -682,22 +684,7 @@ class Trainer:
                 )
 
             loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
-            file_log_metrics.update(
-                {f"train_{k}": values[0] for k, values in loss_components.items()}
-            )
             self.logs_update(loss_components)
-
-            if self.val_every_x_steps and self.global_step % self.val_every_x_steps == 0:
-                if self.global_step % (self.val_every_x_steps * 20) == 0:
-                    self.accelerator.wait_for_everyone()
-                    self.val()
-                self.logs_flash(step=self.global_step, use_segment=True)
-
-            if self.log_every_x_steps and self.global_step % self.log_every_x_steps == 0:
-                metrics_to_log = {k: v for k, v in file_log_metrics.items() if v is not None}
-                self._log_metrics_to_file(
-                    step=self.global_step, phase="train", metrics=metrics_to_log
-                )
 
     def val(self):
         self.model.eval()
@@ -727,7 +714,13 @@ class Trainer:
 
         self.accelerator.wait_for_everyone()
         for i, data in enumerate(
-            tqdm(self.dataloaders["valid"], desc=f"Epoch {self.epoch} Valid")
+            tqdm(
+                self.dataloaders["valid"],
+                desc=f"Epoch {self.epoch} Valid",
+                disable=not self.accelerator.is_main_process,
+                position=1,
+                leave=False,
+            )
         ):
             obs, act, state = data
             plot = i == 0
@@ -929,6 +922,27 @@ class Trainer:
         return logs
 
 
+    def log_train_errors(self, z_out, obs):
+        z_obs_out, _ = self.model.separate_emb(z_out)
+        z_gt = self.model.encode_obs(obs)
+        z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
+
+        err_logs = self.err_eval(z_obs_out, z_tgt)
+
+        err_logs = self.accelerator.gather_for_metrics(err_logs)
+        err_logs = {key: value.mean().item() for key, value in err_logs.items()}
+        err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
+
+        printable_logs = ", ".join(
+            f"{key}={values[0]:.4f}" for key, values in err_logs.items()
+        )
+        self._log_step_message(
+            f"[step {self.global_step}] Train embedding errors: {printable_logs}"
+        )
+
+        self.logs_update(err_logs)
+
+
     def _setup_training_file_logger(self):
         self.training_log_path = Path(os.getcwd()) / "training.log"
         self.training_file_logger = logging.getLogger("training_file_logger")
@@ -1002,41 +1016,38 @@ class Trainer:
             if isinstance(value, torch.Tensor):
                 value = value.detach().cpu().item()
             length = len(value)
-            for log_store in (self.epoch_log, self.segment_log):
-                count, total = log_store.get(key, (0, 0.0))
-                log_store[key] = (
-                    count + length,
-                    total + sum(value),
-                )
+            count, total = self.epoch_log.get(key, (0, 0.0))
+            self.epoch_log[key] = (
+                count + length,
+                total + sum(value),
+            )
 
-    def logs_flash(self, step, use_segment=False):
-        log_source = self.segment_log if use_segment else self.epoch_log
-        if len(log_source) == 0:
-            return
-
+    def logs_flash(self, step):
         epoch_log = OrderedDict()
-        for key, value in log_source.items():
+        for key, value in self.epoch_log.items():
             count, sum = value
             to_log = sum / count
             epoch_log[key] = to_log
         epoch_log["epoch"] = step
-
-        train_loss = epoch_log.get("train_loss")
-        val_loss = epoch_log.get("val_loss")
-        log.info(
-            "Epoch %s  Training loss: %s  Validation loss: %s",
-            self.epoch,
-            f"{train_loss:.4f}" if train_loss is not None else "N/A",
-            f"{val_loss:.4f}" if val_loss is not None else "N/A",
+        metrics_msg = ", ".join(
+            f"{k}={v:.4f}" if isinstance(v, (float, int)) else f"{k}={v}"
+            for k, v in epoch_log.items()
+            if k != "epoch"
+        )
+        self._log_step_message(
+            f"[step {step}] Aggregated metrics (epoch {self.epoch}): {metrics_msg}"
         )
 
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
-        if use_segment:
-            self.segment_log = OrderedDict()
-        else:
-            self.epoch_log = OrderedDict()
-            self.segment_log = OrderedDict()
+        self.epoch_log = OrderedDict()
+
+    def _log_step_message(self, message: str):
+        if self.accelerator.is_main_process:
+            if hasattr(self, "step_logger"):
+                self.step_logger.info(message)
+            else:
+                print(message, flush=True)
 
     def update_latent_metrics(self, encode_output, act, z_out):
         if self.latent_metric_analyzer is None:
