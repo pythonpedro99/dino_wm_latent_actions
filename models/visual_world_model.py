@@ -91,6 +91,7 @@ class VWorldModel(nn.Module):
         self.decoder_criterion = nn.MSELoss()
         self.decoder_latent_loss_weight = 0.25
         self.emb_criterion = nn.MSELoss()
+        self.use_z_q_in_concat = False  # whether to use z_q in concat mode (dim=1) or z_a_down
 
     def train(self, mode=True):
         super().train(mode)
