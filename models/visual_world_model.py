@@ -178,47 +178,93 @@ class VWorldModel(nn.Module):
                 stats = {}
 
                 def add_tensor_stats(name, t):
-                    # t can be 3D or 4D, we flatten everything except last dim
-                    # mean/std are scalar; dim_zero_frac is per-dimension
-                    t_flat = t.view(-1, t.shape[-1])
-                    stats[f"{name}_mean"] = t_flat.mean().item()
-                    stats[f"{name}_std"] = t_flat.std().item()
-                    dim_zero_frac = (t_flat == 0).float().mean(dim=0)                # (D,)
+                    # Flatten everything except last dim
+                    t_flat = t.reshape(-1, t.shape[-1])
+                    stats[f"{name}_mean"] = float(t_flat.mean().item())
+                    stats[f"{name}_std"] = float(t_flat.std().item())
+
+                    dim_zero_frac = (t_flat == 0).float().mean(dim=0)  # (D,)
+                    # store full vector for later programmatic logging, but don't print full vector
                     stats[f"{name}_dim_zero_frac"] = dim_zero_frac.detach().cpu()
+
+                    # compact scalar summaries for printing
+                    stats[f"{name}_dim_zero_frac_mean"] = float(dim_zero_frac.mean().item())
+                    stats[f"{name}_dim_zero_frac_max"] = float(dim_zero_frac.max().item())
 
                 # z_a: pre-downsample, z_a_down: after downsample+shift, z_q: quantized
                 add_tensor_stats("z_a", z_a)
                 add_tensor_stats("z_a_down", z_a_down_shifted.squeeze(2))
                 add_tensor_stats("z_q", quantized_latent_actions)
 
-                # VQ loss (if present in outputs)
-                if "loss" in vq_outputs:
-                    stats["vq_loss"] = vq_outputs["loss"].detach().cpu()
+                # VQ loss (if present)
+                if isinstance(vq_outputs, dict) and ("loss" in vq_outputs) and (vq_outputs["loss"] is not None):
+                    vq_loss_val = vq_outputs["loss"]
+                    stats["vq_loss"] = float(vq_loss_val.detach().float().mean().cpu().item())
 
                 # code usage statistics from indices
-                indices = vq_outputs["indices"]                                      # (B, T)
-                idx_flat = indices.view(-1)
-                # infer codebook size if not explicitly stored
-                codebook_size = getattr(
-                    self.latent_vq_model, "num_embeddings",
-                    int(idx_flat.max().item()) + 1
-                )
-                counts = torch.bincount(idx_flat, minlength=codebook_size)           # (num_codes,)
-                stats["code_counts"] = counts.detach().cpu()
-                stats["num_used_codes"] = int((counts > 0).sum().item())
+                indices = vq_outputs.get("indices", None) if isinstance(vq_outputs, dict) else None
+                if indices is not None:
+                    idx_flat = indices.reshape(-1).detach()
 
-                # entropy over code distribution
-                total = counts.sum()
-                if total > 0:
-                    probs = counts.float() / total
-                    nonzero = probs > 0
-                    entropy = -(probs[nonzero] * probs[nonzero].log()).sum()
-                    stats["code_entropy"] = entropy.detach().cpu()
+                    # infer codebook size if not explicitly stored
+                    codebook_size = getattr(
+                        self.latent_vq_model,
+                        "num_embeddings",
+                        int(idx_flat.max().item()) + 1 if idx_flat.numel() > 0 else 0,
+                    )
+
+                    if codebook_size > 0 and idx_flat.numel() > 0:
+                        counts = torch.bincount(idx_flat, minlength=codebook_size)  # (num_codes,)
+                        stats["code_counts"] = counts.detach().cpu()
+
+                        used = (counts > 0).sum().item()
+                        stats["num_used_codes"] = int(used)
+
+                        total = counts.sum().item()
+                        if total > 0:
+                            probs = counts.float() / counts.sum()
+                            nonzero = probs > 0
+                            entropy = -(probs[nonzero] * probs[nonzero].log()).sum()
+                            stats["code_entropy"] = float(entropy.detach().cpu().item())
+                        else:
+                            stats["code_entropy"] = 0.0
+
+                        # compact summaries for printing
+                        stats["code_topk_counts"] = (
+                            torch.topk(counts, k=min(5, counts.numel())).values.detach().cpu().tolist()
+                        )
+                    else:
+                        stats["num_used_codes"] = 0
+                        stats["code_entropy"] = 0.0
+                        stats["code_topk_counts"] = []
                 else:
-                    stats["code_entropy"] = torch.tensor(0.0)
+                    stats["num_used_codes"] = 0
+                    stats["code_entropy"] = 0.0
+                    stats["code_topk_counts"] = []
 
-                # attach to vq_outputs so the caller can log them
+                # attach to vq_outputs so caller can log them
                 vq_outputs["stats"] = stats
+
+                # ---- SAFE PRINT (rank 0 only) ----
+                is_rank0 = True
+                if torch.distributed.is_available() and torch.distributed.is_initialized():
+                    is_rank0 = (torch.distributed.get_rank() == 0)
+
+                if is_rank0:
+                    msg = (
+                        f"[encode stats @ {self.counter}] "
+                        f"z_a(mean={stats['z_a_mean']:.4f}, std={stats['z_a_std']:.4f}, "
+                        f"zero_frac_mean={stats['z_a_dim_zero_frac_mean']:.4f}, zero_frac_max={stats['z_a_dim_zero_frac_max']:.4f}) | "
+                        f"z_a_down(mean={stats['z_a_down_mean']:.4f}, std={stats['z_a_down_std']:.4f}, "
+                        f"zero_frac_mean={stats['z_a_down_dim_zero_frac_mean']:.4f}, zero_frac_max={stats['z_a_down_dim_zero_frac_max']:.4f}) | "
+                        f"z_q(mean={stats['z_q_mean']:.4f}, std={stats['z_q_std']:.4f}, "
+                        f"zero_frac_mean={stats['z_q_dim_zero_frac_mean']:.4f}, zero_frac_max={stats['z_q_dim_zero_frac_max']:.4f}) | "
+                        f"vq_loss={stats.get('vq_loss', float('nan')):.4f} | "
+                        f"used_codes={stats['num_used_codes']} entropy={stats['code_entropy']:.4f} "
+                        f"top5_counts={stats.get('code_topk_counts', [])}"
+                    )
+                    print(msg, flush=True)
+
 
         return {
             "z": z,
