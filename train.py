@@ -75,6 +75,9 @@ class Trainer:
         self.epoch = 0
         self.global_step = 0
         self.val_every_x_steps = getattr(self.cfg.training, "val_every_x_steps", 0)
+        self.log_train_errors_every_x_steps = getattr(
+            self.cfg.training, "log_train_errors_every_x_steps", 0
+        )
 
         assert cfg.training.batch_size % self.accelerator.num_processes == 0, (
             "Batch size must be divisible by the number of processes. "
@@ -553,6 +556,10 @@ class Trainer:
         for i, data in enumerate(train_bar):
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
+            log_train_errors = (
+                self.log_train_errors_every_x_steps
+                and self.global_step % self.log_train_errors_every_x_steps == 0
+            )
             self.model.train()
             z_out, visual_out, visual_reconstructed, loss, loss_components, _ = self.model(
                 obs, act
@@ -603,9 +610,8 @@ class Trainer:
                 key: value.mean().item() for key, value in loss_components.items()
             }
             self.global_step += 1
-            if self.cfg.has_decoder and plot:
-                # only eval images when plotting due to speed
-                if self.cfg.has_predictor:
+            if self.cfg.has_predictor and (plot or log_train_errors):
+                with torch.no_grad():
                     z_obs_out, z_act_out = self.model.separate_emb(z_out)
                     z_gt = self.model.encode_obs(obs)
                     z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
@@ -619,8 +625,10 @@ class Trainer:
                     }
                     err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
 
-                    self.logs_update(err_logs)
+                self.logs_update(err_logs)
 
+            if self.cfg.has_decoder and plot:
+                # only eval images when plotting due to speed
                 if visual_out is not None:
                     for t in range(
                         self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
