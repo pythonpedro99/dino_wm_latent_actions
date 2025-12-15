@@ -199,8 +199,9 @@ class Trainer:
         self.init_optimizers()
 
         self.epoch_log = OrderedDict()
-        self._setup_training_file_logger()
-        self.step_logger = getattr(self, "training_file_logger", None)
+        if self.accelerator.is_main_process:
+            self._setup_step_logger()
+
 
     def save_ckpt(self):
         self.accelerator.wait_for_everyone()
@@ -616,14 +617,14 @@ class Trainer:
                 self.val()
                 self.logs_flash(step=self.global_step)
 
-            if isinstance(encode_output, dict):
-                vq_outputs = encode_output.get("vq_outputs", {})
-                encode_stats = vq_outputs.get("stats")
-                if encode_stats:
-                    encode_stats = {
-                        f"train_encode_{k}": [v] for k, v in encode_stats.items()
-                    }
-                    self.logs_update(encode_stats)
+            # if isinstance(encode_output, dict):
+            #     vq_outputs = encode_output.get("vq_outputs", {})
+            #     encode_stats = vq_outputs.get("stats")
+            #     if encode_stats:
+            #         encode_stats = {
+            #             f"train_encode_{k}": [v] for k, v in encode_stats.items()
+            #         }
+            #         self.logs_update(encode_stats)
 
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
@@ -833,10 +834,10 @@ class Trainer:
                     )
                     plt.close(fig)
 
-        aggregated_val_metrics = self._aggregate_metric_dicts(val_file_metrics)
-        self._log_metrics_to_file(
-            step=self.global_step, phase="val", metrics=aggregated_val_metrics
-        )
+        #aggregated_val_metrics = self._aggregate_metric_dicts(val_file_metrics)
+        #self._log_metrics_to_file(
+            #step=self.global_step, phase="val", metrics=aggregated_val_metrics
+        #)
 
     def openloop_rollout(
             self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
@@ -943,26 +944,24 @@ class Trainer:
         self.logs_update(err_logs)
 
 
-    def _setup_training_file_logger(self):
-        self.training_log_path = Path(os.getcwd()) / "training.log"
-        self.training_file_logger = logging.getLogger("training_file_logger")
-        self.training_file_logger.setLevel(logging.INFO)
-        self.training_file_logger.propagate = False
+    def _setup_step_logger(self):
+        self.step_logger = logging.getLogger("train_step_logger")
+        self.step_logger.setLevel(logging.INFO)
+        self.step_logger.propagate = False
 
-        existing_handlers = [
-            handler
-            for handler in self.training_file_logger.handlers
-            if isinstance(handler, logging.FileHandler)
-            and getattr(handler, "baseFilename", None)
-            == str(self.training_log_path)
-        ]
-        if not existing_handlers:
-            file_handler = logging.FileHandler(self.training_log_path, mode="a")
-            formatter = logging.Formatter(
-                fmt="%(asctime)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-            )
-            file_handler.setFormatter(formatter)
-            self.training_file_logger.addHandler(file_handler)
+        if self.step_logger.handlers:
+            return
+
+        formatter = logging.Formatter("%(asctime)s - %(message)s")
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        self.step_logger.addHandler(stream_handler)
+
+        log_file = Path(os.getcwd()) / "training.log"
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        self.step_logger.addHandler(file_handler)
+
 
     def _aggregate_metric_dicts(self, metrics_list):
         if not metrics_list:
