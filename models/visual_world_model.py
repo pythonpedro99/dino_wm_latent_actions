@@ -465,7 +465,7 @@ class VWorldModel(nn.Module):
             z_obses, z
         """
         encode_output = self.encode(obs, act)
-        latent_actions = encode_output["latent_actions"]  # (b, t+n, latent_action_dim)
+        latent_actions = encode_output["latent_actions"][:, :-1]  # (b, t+n-1, latent_action_dim)
 
         z = encode_output["z"][:, :num_obs_init]
         act = latent_actions #self.encode_act(act)
