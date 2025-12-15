@@ -34,10 +34,10 @@ hydra:
 training:
   seed: 0
   epochs: 1
-  batch_size: 14 # should >= nodes * tasks_per_node
+  batch_size: 32 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   val_every_x_steps: 8000 # set >0 to run validation every N training steps
-  log_every_x_steps: 500 # write training stats to training.log every N training steps
+  log_every_x_steps: 50 # write training stats to training.log every N training steps
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
   encoder_lr: 1e-6
@@ -60,7 +60,7 @@ num_action_repeat: 1
 proprio_emb_dim: 2
 num_proprio_repeat: 1
 
-num_hist: 3
+num_hist: 1
 num_pred: 1 # only supports 1
 has_predictor: True # set this to False for only training a decoder
 has_decoder: False # set this to False for only training a predictor
@@ -75,8 +75,8 @@ model:
   train_decoder: False
   # Split each latent action into 5 codebook segments of size 8 (5 * 8 = 40)
   # while using a single shared embedding table.
-  codebook_splits: 5
-  codebook_dim: 2  # latent_action_dim = codebook_splits * codebook_dim
+  codebook_splits: 1
+  codebook_dim: 10  # latent_action_dim = codebook_splits * codebook_dim
   latent_action_dim: 10
   commitment: 0.0
   ema_decay: 0.99
