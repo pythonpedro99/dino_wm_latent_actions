@@ -557,9 +557,14 @@ class Trainer:
             obs, act, state = data
             plot = i == 0  # only plot from the first batch
             self.model.train()
-            z_out, visual_out, visual_reconstructed, loss, loss_components, _ = self.model(
-                obs, act
-            )
+            (
+                z_out,
+                visual_out,
+                visual_reconstructed,
+                loss,
+                loss_components,
+                encode_output,
+            ) = self.model(obs, act)
 
             self.encoder_optimizer.zero_grad()
             if self.cfg.has_decoder:
@@ -607,6 +612,13 @@ class Trainer:
             }
             self.global_step += 1
             file_log_metrics["train_loss"] = loss_scalar
+
+            encode_stats = None
+            if isinstance(encode_output, dict):
+                vq_outputs = encode_output.get("vq_outputs", {})
+                encode_stats = vq_outputs.get("stats")
+            if encode_stats:
+                file_log_metrics.update({f"encode_{k}": v for k, v in encode_stats.items()})
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
@@ -950,10 +962,37 @@ class Trainer:
                 counts[key] = counts.get(key, 0) + 1
         return {key: aggregated[key] / counts[key] for key in aggregated}
 
+    def _format_metric_value(self, value):
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu()
+            if value.numel() == 1:
+                return f"{value.item():.6f}"
+            return "[" + ", ".join(f"{v:.6f}" for v in value.flatten().tolist()) + "]"
+        if isinstance(value, np.ndarray):
+            if value.size == 1:
+                return f"{float(value):.6f}"
+            return "[" + ", ".join(f"{v:.6f}" for v in value.flatten().tolist()) + "]"
+        if isinstance(value, (list, tuple)):
+            if len(value) == 1 and isinstance(value[0], numbers.Number):
+                return f"{value[0]:.6f}"
+            return "[" + ", ".join(str(v) for v in value) + "]"
+        if isinstance(value, numbers.Number):
+            return f"{value:.6f}"
+        return str(value)
+
     def _log_metrics_to_file(self, step, phase, metrics):
         if not self.accelerator.is_main_process or not metrics:
             return
-        metrics_str = "  ".join([f"{k}={v:.6f}" for k, v in metrics.items()])
+
+        formatted_pairs = []
+        for key, value in metrics.items():
+            try:
+                formatted_value = self._format_metric_value(value)
+            except Exception:
+                formatted_value = str(value)
+            formatted_pairs.append(f"{key}={formatted_value}")
+
+        metrics_str = "  ".join(formatted_pairs)
         self.training_file_logger.info(
             "Epoch %s Step %s [%s] %s", self.epoch, step, phase, metrics_str
         )
