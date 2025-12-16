@@ -78,8 +78,8 @@ model:
   codebook_splits: 1
   codebook_dim: 10  # latent_action_dim = codebook_splits * codebook_dim
   latent_action_dim: 10
-  commitment: 0.0
-  ema_decay: 0.99
+  commitment: 0.1
+  ema_decay: 0.95
 
 debug: False 
 

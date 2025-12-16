@@ -91,7 +91,7 @@ class VWorldModel(nn.Module):
         self.decoder_criterion = nn.MSELoss()
         self.decoder_latent_loss_weight = 0.25
         self.emb_criterion = nn.MSELoss()
-        self.use_z_q_in_concat = False  # whether to use z_q in concat mode (dim=1) or z_a_down
+        self.use_z_q_in_concat = True  # whether to use z_q in concat mode (dim=1) or z_a_down
 
     def train(self, mode=True):
         super().train(mode)
@@ -465,10 +465,11 @@ class VWorldModel(nn.Module):
             z_obses, z
         """
         encode_output = self.encode(obs, act)
-        latent_actions = encode_output["latent_actions"][:, :-1]  # (b, t+n-1, latent_action_dim)
+        #latent_actions = encode_output["latent_actions"][:, :-1]  # (b, t+n-1, latent_action_dim)
+        quantized_latent_actions = encode_output["quantized_latent_actions"][:, :-1]  # (b, t+n-1, latent_action_dim)
 
         z = encode_output["z"][:, :num_obs_init]
-        act = latent_actions #self.encode_act(act)
+        act = quantized_latent_actions #self.encode_act(act)
         action = act[:, num_obs_init:]
 
         t = 0
