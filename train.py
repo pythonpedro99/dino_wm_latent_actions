@@ -133,16 +133,29 @@ class Trainer:
         self.train_traj_dset = traj_dsets["train"]
         self.val_traj_dset = traj_dsets["valid"]
 
+        # Deterministic shuffling for train; deterministic (non-shuffled) order for valid
+        g_train = torch.Generator().manual_seed(self.cfg.training.seed)
+
         self.dataloaders = {
-            x: torch.utils.data.DataLoader(
-                self.datasets[x],
+            "train": torch.utils.data.DataLoader(
+                self.datasets["train"],
                 batch_size=self.cfg.gpu_batch_size,
-                shuffle=False, # already shuffled in TrajSlicerDataset
+                shuffle=True,
+                generator=g_train,
                 num_workers=self.cfg.env.num_workers,
+                prefetch_factor=1 if self.cfg.env.num_workers > 0 else None,
                 collate_fn=None,
-            )
-            for x in ["train", "valid"]
+            ),
+            "valid": torch.utils.data.DataLoader(
+                self.datasets["valid"],
+                batch_size=self.cfg.gpu_batch_size,
+                shuffle=False,
+                num_workers=self.cfg.env.num_workers,
+                prefetch_factor=1 if self.cfg.env.num_workers > 0 else None,
+                collate_fn=None,
+            ),
         }
+
 
         log.info(f"dataloader batch size: {self.cfg.gpu_batch_size}")
 
@@ -152,19 +165,16 @@ class Trainer:
 
         self.encoder = None
         self.action_encoder = None
-        self.proprio_encoder = None
         self.predictor = None
         self.decoder = None
         self.model = None
         self.latent_action_model = None
         self.latent_vq_model = None
         self.latent_action_down = None
-        self.latent_action_up = None
-        self.latent_action_norm = None
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
-        self.latent_optimizer = None  # TODO why separate optimizer?
+        self.latent_optimizer = None 
         self.latent_metric_analyzer = None
         log.info(f"Train encoder, predictor, decoder:\
             {self.cfg.model.train_encoder}\
@@ -185,14 +195,12 @@ class Trainer:
         self._keys_to_save += (
             ["decoder", "decoder_optimizer"] if self.train_decoder else []
         )
-        self._keys_to_save += ["action_encoder", "proprio_encoder"]
+        self._keys_to_save += ["action_encoder"]
         self._keys_to_save += [
             "latent_action_model",
             "latent_vq_model",
             "latent_action_down",
-            "latent_action_up",
             "latent_optimizer",
-            "latent_action_norm",
         ]
         self.init_models()
         self._init_latent_metric_analyzer()
@@ -272,14 +280,6 @@ class Trainer:
             for param in self.encoder.parameters():
                 param.requires_grad = False
 
-        self.proprio_encoder = hydra.utils.instantiate(
-            self.cfg.proprio_encoder,
-            in_chans=self.datasets["train"].proprio_dim,
-            emb_dim=self.cfg.proprio_emb_dim,
-        )
-        proprio_emb_dim = self.proprio_encoder.emb_dim
-        print(f"Proprio encoder type: {type(self.proprio_encoder)}")
-        self.proprio_encoder = self.accelerator.prepare(self.proprio_encoder)
 
         self.action_encoder = hydra.utils.instantiate(
             self.cfg.action_encoder,
@@ -293,8 +293,6 @@ class Trainer:
 
         if self.accelerator.is_main_process:
             self.wandb_run.watch(self.action_encoder)
-            self.wandb_run.watch(self.proprio_encoder)
-
         # initialize predictor
         if self.encoder.latent_ndim == 1:  # if feature is 1D
             num_patches = 1
@@ -312,12 +310,7 @@ class Trainer:
                     self.cfg.predictor,
                     num_patches=num_patches,
                     num_frames=self.cfg.num_hist,
-                    dim=self.encoder.emb_dim
-                    + (
-                        proprio_emb_dim * self.cfg.num_proprio_repeat
-                        + action_emb_dim * self.cfg.num_action_repeat
-                    )
-                    * (self.cfg.concat_dim),
+                    dim=self.encoder.emb_dim + (action_emb_dim * self.cfg.num_action_repeat) * (self.cfg.concat_dim),
                 )
             if not self.train_predictor:
                 for param in self.predictor.parameters():
@@ -367,8 +360,6 @@ class Trainer:
         )
         if self.latent_action_down is None:
             self.latent_action_down = nn.Linear(self.encoder.emb_dim, latent_dim)
-        if self.latent_action_up is None:
-            self.latent_action_up = nn.Linear(latent_dim, self.encoder.emb_dim)
 
         (
             self.latent_action_model,
@@ -385,24 +376,17 @@ class Trainer:
         self.model = hydra.utils.instantiate(
             self.cfg.model,
             encoder=self.encoder,
-            proprio_encoder=self.proprio_encoder,
             action_encoder=self.action_encoder,
             predictor=self.predictor,
             decoder=self.decoder,
-            proprio_dim=proprio_emb_dim,
             action_dim=action_emb_dim,
             concat_dim=self.cfg.concat_dim,
             num_action_repeat=self.cfg.num_action_repeat,
-            num_proprio_repeat=self.cfg.num_proprio_repeat,
             latent_action_model=self.latent_action_model,
             latent_vq_model=self.latent_vq_model,
             latent_action_down=self.latent_action_down,
-            latent_action_up=self.latent_action_up,
         )
         self.model.latent_action_down = self.model.latent_action_down.to(self.device)
-        self.model.latent_action_up = self.model.latent_action_up.to(self.device)
-        self.model.latent_action_norm = self.model.latent_action_norm.to(self.device)
-        self.latent_action_norm = self.model.latent_action_norm
 
     def init_optimizers(self):
         self.encoder_optimizer = torch.optim.Adam(
@@ -420,9 +404,7 @@ class Trainer:
             )
 
             self.action_encoder_optimizer = torch.optim.AdamW(
-                itertools.chain(
-                    self.action_encoder.parameters(), self.proprio_encoder.parameters()
-                ),
+                    self.action_encoder.parameters(),
                 lr=self.cfg.training.action_encoder_lr,
             )
             self.action_encoder_optimizer = self.accelerator.prepare(
@@ -439,8 +421,6 @@ class Trainer:
             self.latent_action_model.parameters(),
             self.latent_vq_model.parameters(),
             self.latent_action_down.parameters(),
-            self.latent_action_up.parameters(),
-            self.model.latent_action_norm.parameters(),
         )
         self.latent_optimizer = torch.optim.AdamW(
             latent_params,
@@ -564,7 +544,7 @@ class Trainer:
             )
         ):
             self.global_step += 1
-            obs, act, state = data
+            obs, act,_ = data
             plot = i == 0  # only plot from the first batch
             self.model.train()
             (
@@ -626,10 +606,7 @@ class Trainer:
                     z_obs_out, z_act_out = self.model.separate_emb(z_out)
                     z_gt = self.model.encode_obs(obs)
                     z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
-
-                    state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
                     err_logs = self.err_eval(z_obs_out, z_tgt)
-
                     err_logs = self.accelerator.gather_for_metrics(err_logs)
                     err_logs = {
                         key: value.mean().item() for key, value in err_logs.items()
@@ -717,7 +694,7 @@ class Trainer:
                 leave=False,
             )
         ):
-            obs, act, state = data
+            obs, act, _ = data
             plot = i == 0
             self.model.eval()
             z_out, visual_out, visual_reconstructed, loss, loss_components, encode_output = self.model(
@@ -746,8 +723,6 @@ class Trainer:
                     z_obs_out, z_act_out = self.model.separate_emb(z_out)
                     z_gt = self.model.encode_obs(obs)
                     z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
-
-                    state_tgt = state[:, -self.model.num_hist :]  # (b, num_hist, dim)
                     err_logs = self.err_eval(z_obs_out, z_tgt)
 
                     err_logs = self.accelerator.gather_for_metrics(err_logs)
@@ -828,13 +803,10 @@ class Trainer:
                     )
                     plt.close(fig)
 
-        #aggregated_val_metrics = self._aggregate_metric_dicts(val_file_metrics)
-        #self._log_metrics_to_file(
-            #step=self.global_step, phase="val", metrics=aggregated_val_metrics
-        #)
+        
 
     def openloop_rollout(
-            self, dset, num_rollout=10, rand_start_end=True, min_horizon=2, mode="train"
+            self, dset, num_rollout=8, rand_start_end=True, min_horizon=2, mode="train"
         ):
         np.random.seed(self.cfg.training.seed)
         min_horizon = min_horizon + self.cfg.num_hist
@@ -850,7 +822,7 @@ class Trainer:
             valid_traj = False
             while not valid_traj:
                 traj_idx = np.random.randint(0, len(dset))
-                obs, act, state, _ = dset[traj_idx]
+                obs, act, _,_ = dset[traj_idx]
                 act = act.to(self.device)
                 if rand_start_end:
                     if obs["visual"].shape[0] > min_horizon * self.cfg.frameskip + 1:

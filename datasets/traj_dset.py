@@ -61,8 +61,9 @@ class TrajSlicerDataset(TrajDataset):
         self.dataset = dataset
         self.num_frames = num_frames
         self.frameskip = frameskip
+
         self.slices = []
-        for i in range(len(self.dataset)): 
+        for i in range(len(self.dataset)):
             T = self.dataset.get_seq_length(i)
             if T - num_frames < 0:
                 print(f"Ignored short sequence #{i}: len={T}, num_frames={num_frames}")
@@ -70,18 +71,15 @@ class TrajSlicerDataset(TrajDataset):
                 self.slices += [
                     (i, start, start + num_frames * self.frameskip)
                     for start in range(T - num_frames * frameskip + 1)
-                ]  # slice indices follow convention [start, end)
-        # randomly permute the slices
-        self.slices = np.random.permutation(self.slices)
-        
-        self.proprio_dim = self.dataset.proprio_dim
+                ]
+
+        self.proprio_dim = getattr(self.dataset, "proprio_dim", 0)
+        self.state_dim = getattr(self.dataset, "state_dim", 0)
+
         if process_actions == "concat":
             self.action_dim = self.dataset.action_dim * self.frameskip
         else:
             self.action_dim = self.dataset.action_dim
-
-        self.state_dim = self.dataset.state_dim
-
 
     def get_seq_length(self, idx: int) -> int:
         return self.num_frames
@@ -91,13 +89,20 @@ class TrajSlicerDataset(TrajDataset):
 
     def __getitem__(self, idx):
         i, start, end = self.slices[idx]
+
+        # base dataset returns: obs, act, state, info
         obs, act, state, _ = self.dataset[i]
+
         for k, v in obs.items():
             obs[k] = v[start:end:self.frameskip]
+
         state = state[start:end:self.frameskip]
+
         act = act[start:end]
-        act = rearrange(act, "(n f) d -> n (f d)", n=self.num_frames)  # concat actions
-        return tuple([obs, act, state])
+        act = rearrange(act, "(n f) d -> n (f d)", n=self.num_frames)
+
+        return obs, act, state
+
 
 
 def random_split_traj(

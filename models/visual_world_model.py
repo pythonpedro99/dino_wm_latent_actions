@@ -10,70 +10,56 @@ class VWorldModel(nn.Module):
         num_hist,
         num_pred,
         encoder,
-        proprio_encoder,
         action_encoder,
         decoder,
         predictor,
         latent_action_model,
         latent_vq_model,
         latent_action_down,
-        latent_action_up,
-        ema_decay=0.99,
-        commitment=0.25,
-        codebook_splits=None,
-        codebook_dim=None,
-        proprio_dim=384,
-        action_dim=384,
-        concat_dim=0,
-        latent_action_dim=32,
-        num_action_repeat=1,
-        num_proprio_repeat=1,
-        train_encoder=False,
-        train_predictor=True,
-        train_decoder=False,
+        ema_decay,
+        commitment,
+        codebook_splits,
+        codebook_dim,
+        action_dim,
+        concat_dim,
+        latent_action_dim,
+        num_action_repeat,
+        train_encoder,
+        train_predictor,
+        train_decoder,
     ):
         super().__init__()
         self.num_hist = num_hist
         self.num_pred = num_pred
         self.encoder = encoder
-        self.proprio_encoder = proprio_encoder
         self.action_encoder = action_encoder
         self.decoder = decoder  # decoder could be None
         self.predictor = predictor  # predictor could be None
         self.latent_action_model = latent_action_model
         self.latent_vq_model = latent_vq_model
         self.latent_action_down = latent_action_down
-        self.latent_action_up = latent_action_up
-        self.latent_action_norm = nn.LayerNorm(getattr(self.latent_action_down, "out_features", latent_action_dim))
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder
-        self.num_action_repeat = num_action_repeat
-        self.num_proprio_repeat = num_proprio_repeat
-        self.proprio_dim = proprio_dim * num_proprio_repeat 
+        self.num_action_repeat = num_action_repeat 
         self.action_dim = action_dim * num_action_repeat 
-        self.emb_dim = self.encoder.emb_dim + (self.action_dim + self.proprio_dim) * (concat_dim) # Not used
+        self.emb_dim = self.encoder.emb_dim + (self.action_dim ) * (concat_dim) # Not used
         self.latent_action_dim = latent_action_dim
         self.encoder_emb_dim = self.encoder.emb_dim
         self.codebook_splits = codebook_splits
         self.codebook_dim = codebook_dim
 
         print(f"num_action_repeat: {self.num_action_repeat}")
-        print(f"num_proprio_repeat: {self.num_proprio_repeat}")
-        print(f"proprio encoder: {proprio_encoder}")
         print(f"action encoder: {action_encoder}")
         print(f"latent_action_model: {self.latent_action_model}")
         print(f"latent_vq_model: {self.latent_vq_model}")
         print(f"latent_action_down: {self.latent_action_down}")
-        print(f"latent_action_up: {self.latent_action_up}")
-        print(f"latent_action_norm: {self.latent_action_norm}")
         print(f"latent_action_dim: {self.latent_action_dim}")
-        print(f"proprio_dim: {proprio_dim}, after repeat: {self.proprio_dim}")
         print(f"action_dim: {action_dim}, after repeat: {self.action_dim}")
         print(f"encoder_emb_dim: {self.encoder_emb_dim}")
 
 
-        self.concat_dim = concat_dim # 0 or 1
+        self.concat_dim = concat_dim  # 0 or 1
         assert concat_dim == 0 or concat_dim == 1, f"concat_dim {concat_dim} not supported."
         print("Model emb_dim: ", self.emb_dim)
 
@@ -99,7 +85,6 @@ class VWorldModel(nn.Module):
             self.encoder.train(mode)
         if self.predictor is not None and self.train_predictor:
             self.predictor.train(mode)
-        self.proprio_encoder.train(mode)
         self.action_encoder.train(mode)
         if self.decoder is not None and self.train_decoder:
             self.decoder.train(mode)
@@ -109,7 +94,6 @@ class VWorldModel(nn.Module):
         self.encoder.eval()
         if self.predictor is not None:
             self.predictor.eval()
-        self.proprio_encoder.eval()
         self.action_encoder.eval()
         if self.decoder is not None:
             self.decoder.eval()
@@ -134,21 +118,15 @@ class VWorldModel(nn.Module):
         quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)                  # z_q: (B, T, A)
         vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)                    # (B, T)
 
-        proprio_token = torch.zeros_like(z_dct["proprio"].unsqueeze(2))             # (B, T, 1, A_p)
-
         # ----- concat modes -----
         if self.concat_dim == 0:
             # concat along token-dim; use quantized actions as before
             act_token = quantized_latent_actions.unsqueeze(2)                       # (B, T, 1, A)
-            z = torch.cat([z_dct["visual"], proprio_token, act_token], dim=2)
+            z = torch.cat([z_dct["visual"], act_token], dim=2)
 
         elif self.concat_dim == 1:
             # concat along feature-dim; gate between z_a_down and z_q per flag
-            proprio_tiled = repeat(
-                proprio_token, "b t 1 a -> b t f a",
-                f=z_dct["visual"].shape[2]
-            )
-            proprio_repeated = proprio_tiled.repeat(1, 1, 1, self.num_proprio_repeat)
+            
 
             # decide which latent action representation to use
             use_z_q = getattr(self, "use_z_q_in_concat", False)
@@ -163,7 +141,7 @@ class VWorldModel(nn.Module):
             )
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
 
-            z = torch.cat([z_dct["visual"], proprio_repeated, act_repeated], dim=3)
+            z = torch.cat([z_dct["visual"], act_repeated], dim=3)
         else:
             raise ValueError(f"Unsupported concat_dim: {self.concat_dim}")
 
@@ -282,9 +260,6 @@ class VWorldModel(nn.Module):
         act = self.action_encoder(act) # (b, num_frames, action_emb_dim)
         return act
     
-    def encode_proprio(self, proprio):
-        proprio = self.proprio_encoder(proprio)
-        return proprio
 
     def encode_obs(self, obs):
         """
@@ -297,10 +272,7 @@ class VWorldModel(nn.Module):
         visual = self.encoder_transform(visual)
         visual_embs = self.encoder.forward(visual)
         visual_embs = rearrange(visual_embs, "(b t) p d -> b t p d", b=b)
-
-        proprio = obs['proprio']
-        proprio_emb = self.encode_proprio(proprio)
-        return {"visual": visual_embs, "proprio": proprio_emb}
+        return {"visual": visual_embs}
 
     def predict(self, z):  # in embedding space
         """
@@ -332,11 +304,9 @@ class VWorldModel(nn.Module):
         b, num_frames, num_patches, emb_dim = z_obs["visual"].shape
         visual, diff = self.decoder(z_obs["visual"])  # (b*num_frames, 3, 224, 224)
         visual = rearrange(visual, "(b t) c h w -> b t c h w", t=num_frames)
-        obs = {
-            "visual": visual,
-            "proprio": z_obs["proprio"], # Note: no decoder for proprio for now!
-        }
+        obs = {"visual": visual}
         return obs, diff
+
     
     def separate_emb(self, z):
         """
@@ -344,16 +314,18 @@ class VWorldModel(nn.Module):
         output: z_obs (dict), z_act (tensor)
         """
         if self.concat_dim == 0:
-            z_visual, z_proprio, z_act = z[:, :, :-2, :], z[:, :, -2, :], z[:, :, -1, :]
+                z_visual, z_act = z[:, :, :-1, :], z[:, :, -1, :]
+                z_obs = {"visual": z_visual}
+                return z_obs, z_act
+
         elif self.concat_dim == 1:
-            z_visual, z_proprio, z_act = z[..., :-(self.proprio_dim + self.action_dim)], \
-                                         z[..., -(self.proprio_dim + self.action_dim) :-self.action_dim],  \
-                                         z[..., -self.action_dim:]
-            # remove tiled dimensions
-            z_proprio = z_proprio[:, :, 0, : self.proprio_dim // self.num_proprio_repeat]
+            z_visual = z[..., :-self.action_dim]
+            z_act = z[..., -self.action_dim:]
+            # remove tiled dims
             z_act = z_act[:, :, 0, : self.action_dim // self.num_action_repeat]
-        z_obs = {"visual": z_visual, "proprio": z_proprio}
-        return z_obs, z_act
+            z_obs = {"visual": z_visual}
+            return z_obs, z_act
+
 
     def forward(self, obs, act):
         """
@@ -394,27 +366,20 @@ class VWorldModel(nn.Module):
 
             # Compute loss for visual, proprio dims (i.e. exclude action dims)
             if self.concat_dim == 0:
-                z_visual_loss = self.emb_criterion(z_pred[:, :, :-2, :], z_tgt[:, :, :-2, :].detach())
-                z_proprio_loss = self.emb_criterion(z_pred[:, :, -2, :], z_tgt[:, :, -2, :].detach())
-                z_loss = self.emb_criterion(z_pred[:, :, :-1, :], z_tgt[:, :, :-1, :].detach())
+                z_visual_loss = self.emb_criterion(z_pred[:, :, :-1, :], z_tgt[:, :, :-1, :].detach())
+                z_loss = z_visual_loss
+
             elif self.concat_dim == 1:
                 z_visual_loss = self.emb_criterion(
-                    z_pred[:, :, :, :-(self.proprio_dim + self.action_dim)], \
-                    z_tgt[:, :, :, :-(self.proprio_dim + self.action_dim)].detach()
-                )
-                z_proprio_loss = self.emb_criterion(
-                    z_pred[:, :, :, -(self.proprio_dim + self.action_dim): -self.action_dim], 
-                    z_tgt[:, :, :, -(self.proprio_dim + self.action_dim): -self.action_dim].detach()
-                )
-                z_loss = self.emb_criterion(
-                    z_pred[:, :, :, :-self.action_dim], 
+                    z_pred[:, :, :, :-self.action_dim],
                     z_tgt[:, :, :, :-self.action_dim].detach()
                 )
+                z_loss = z_visual_loss
+
 
             loss = loss + z_loss
             loss_components["z_loss"] = z_loss
             loss_components["z_visual_loss"] = z_visual_loss
-            loss_components["z_proprio_loss"] = z_proprio_loss
         else:
             visual_pred = None
             z_pred = None

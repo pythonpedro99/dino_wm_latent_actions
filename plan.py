@@ -29,12 +29,10 @@ ALL_MODEL_KEYS = [
     "encoder",
     "predictor",
     "decoder",
-    "proprio_encoder",
     "action_encoder",
     "latent_action_model",
     "latent_vq_model",
     "latent_action_down",
-    "latent_action_up",
 ]
 
 def planning_main_in_dir(working_dir, cfg_dict):
@@ -149,10 +147,6 @@ class PlanWorkspace:
         self.data_preprocessor = Preprocessor(
             action_mean=self.dset.action_mean,
             action_std=self.dset.action_std,
-            state_mean=self.dset.state_mean,
-            state_std=self.dset.state_std,
-            proprio_mean=self.dset.proprio_mean,
-            proprio_std=self.dset.proprio_std,
             transform=self.dset.transform,
         )
 
@@ -417,25 +411,19 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
         )
     if "latent_action_down" not in result:
         result["latent_action_down"] = nn.Linear(encoder_emb_dim, latent_dim)
-    if "latent_action_up" not in result:
-        result["latent_action_up"] = nn.Linear(latent_dim, encoder_emb_dim)
 
     model = hydra.utils.instantiate(
         train_cfg.model,
         encoder=result["encoder"],
-        proprio_encoder=result["proprio_encoder"],
         action_encoder=result["action_encoder"],
         predictor=result["predictor"],
         decoder=result["decoder"],
-        proprio_dim=train_cfg.proprio_emb_dim,
         action_dim=train_cfg.action_emb_dim,
         concat_dim=train_cfg.concat_dim,
         num_action_repeat=num_action_repeat,
-        num_proprio_repeat=train_cfg.num_proprio_repeat,
         latent_action_model=result["latent_action_model"],
         latent_vq_model=result["latent_vq_model"],
         latent_action_down=result["latent_action_down"],
-        latent_action_up=result["latent_action_up"],
     )
     model.to(device)
     return model
