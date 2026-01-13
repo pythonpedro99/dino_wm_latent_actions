@@ -67,19 +67,30 @@ has_decoder: False # set this to False for only training a predictor
 
 model:
   _target_: models.visual_world_model.VWorldModel
+
+  # mode selection (XOR with use_action_encoder)
+  use_action_encoder: false
+  use_lam: true
+
+  # dimensions / sequence
   image_size: ${img_size}
   num_hist: ${num_hist}
   num_pred: ${num_pred}
-  train_encoder: False
-  train_predictor: True
-  train_decoder: False
-  # Split each latent action into 5 codebook segments of size 8 (5 * 8 = 40)
-  # while using a single shared embedding table.
+
+  # training toggles
+  train_encoder: false
+  train_predictor: true
+  train_decoder: false
+  train_action_encoder: false   # explicit, even though use_action_encoder=false
+  train_lam: true               # must be true only if use_lam=true
+
+  # latent-action (VQ) config
   codebook_splits: 1
-  codebook_dim: 10  # latent_action_dim = codebook_splits * codebook_dim
+  codebook_dim: 10              # latent_action_dim = codebook_splits * codebook_dim (if you use that convention)
   latent_action_dim: 10
   commitment: 0.1
   ema_decay: 0.95
+
 
 debug: False 
 

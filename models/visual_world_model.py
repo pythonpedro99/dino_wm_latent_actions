@@ -10,14 +10,8 @@ class VWorldModel(nn.Module):
         num_hist,
         num_pred,
         encoder,
-        action_encoder,
         decoder,
         predictor,
-        latent_action_model,
-        latent_vq_model,
-        latent_action_down,
-        ema_decay,
-        commitment,
         codebook_splits,
         codebook_dim,
         action_dim,
@@ -27,6 +21,11 @@ class VWorldModel(nn.Module):
         train_encoder,
         train_predictor,
         train_decoder,
+        train_lam,
+        action_encoder=None,
+        latent_action_model=None,
+        vq_model=None,
+        latent_action_down=None,
     ):
         super().__init__()
         self.num_hist = num_hist
@@ -36,7 +35,7 @@ class VWorldModel(nn.Module):
         self.decoder = decoder  # decoder could be None
         self.predictor = predictor  # predictor could be None
         self.latent_action_model = latent_action_model
-        self.latent_vq_model = latent_vq_model
+        self.vq_model = vq_model
         self.latent_action_down = latent_action_down
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
@@ -52,7 +51,7 @@ class VWorldModel(nn.Module):
         print(f"num_action_repeat: {self.num_action_repeat}")
         print(f"action encoder: {action_encoder}")
         print(f"latent_action_model: {self.latent_action_model}")
-        print(f"latent_vq_model: {self.latent_vq_model}")
+        print(f"latent_vq_model: {self.vq_model}")
         print(f"latent_action_down: {self.latent_action_down}")
         print(f"latent_action_dim: {self.latent_action_dim}")
         print(f"action_dim: {action_dim}, after repeat: {self.action_dim}")
@@ -114,7 +113,7 @@ class VWorldModel(nn.Module):
             dim=1
         )
 
-        vq_outputs = self.latent_vq_model(z_a_down_shifted)
+        vq_outputs = self.vq_model(z_a_down_shifted)
         quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)                  # z_q: (B, T, A)
         vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)                    # (B, T)
 
@@ -187,7 +186,7 @@ class VWorldModel(nn.Module):
 
                     # infer codebook size if not explicitly stored
                     codebook_size = getattr(
-                        self.latent_vq_model,
+                        self.vq_model,
                         "num_embeddings",
                         int(idx_flat.max().item()) + 1 if idx_flat.numel() > 0 else 0,
                     )

@@ -161,15 +161,18 @@ def load_pusht_slice_train_val(
     num_pred: int,
     frameskip: int,
     normalize_action: bool,
+    action_scale: float,
+    relative: bool,
     with_velocity: bool,
+    process_actions: str,
 ):
     train_dset = PushTDataset(
         n_rollout=n_rollout,
         transform=transform,
         data_path=data_path + "/train",
         normalize_action=normalize_action,
-        relative=True,
-        action_scale=100.0,
+        relative=relative,
+        action_scale=action_scale,
         with_velocity=with_velocity,
     )
 
@@ -178,14 +181,14 @@ def load_pusht_slice_train_val(
         transform=transform,
         data_path=data_path + "/val",
         normalize_action=normalize_action,
-        relative=True,
-        action_scale=100.0,
+        relative=relative,
+        action_scale=action_scale,
         with_velocity=with_velocity,
     )
 
     num_frames = num_hist + num_pred
-    train_slices = TrajSlicerDataset(train_dset, num_frames, frameskip)
-    val_slices = TrajSlicerDataset(val_dset, num_frames, frameskip)
+    train_slices = TrajSlicerDataset(train_dset, num_frames, frameskip, process_actions)
+    val_slices = TrajSlicerDataset(val_dset, num_frames, frameskip, process_actions)
 
     datasets = {"train": train_slices, "valid": val_slices}
     traj_dset = {"train": train_dset, "valid": val_dset}

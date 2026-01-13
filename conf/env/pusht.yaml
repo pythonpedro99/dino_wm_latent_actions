@@ -9,8 +9,11 @@ dataset:
   with_velocity: false
   n_rollout: null
   normalize_action: ${normalize_action}
+  relative: true
+  action_scale: 100.0
   data_path: ${oc.env:DATASET_DIR}
   split_ratio: 0.9
+  process_actions: "concat"
   transform:
     _target_: "datasets.img_transforms.default_transform"
     img_size: ${img_size}

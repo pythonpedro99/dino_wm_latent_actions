@@ -74,12 +74,8 @@ class Trainer:
         self.total_epochs = self.cfg.training.epochs
         self.epoch = 0
         self.global_step = 0
-        self.val_every_x_steps = getattr(self.cfg.training, "val_every_x_steps", 0)
-        self.log_every_x_steps = getattr(self.cfg.training, "log_every_x_steps", 0)
-        self.log_train_error_every_x_steps = getattr(
-            self.cfg.training, "log_train_error_every_x_steps", 0
-        )
-
+        self.val_every_x_steps = self.cfg.training.val_every_x_steps
+        
         assert cfg.training.batch_size % self.accelerator.num_processes == 0, (
             "Batch size must be divisible by the number of processes. "
             f"Batch_size: {cfg.training.batch_size} num_processes: {self.accelerator.num_processes}."
@@ -167,41 +163,58 @@ class Trainer:
         self.action_encoder = None
         self.predictor = None
         self.decoder = None
-        self.model = None
         self.latent_action_model = None
-        self.latent_vq_model = None
+        self.vq_model = None
         self.latent_action_down = None
+        self.model = None
+
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
-        self.latent_optimizer = None 
-        self.latent_metric_analyzer = None
-        log.info(f"Train encoder, predictor, decoder:\
-            {self.cfg.model.train_encoder}\
-            {self.cfg.model.train_predictor}\
-            {self.cfg.model.train_decoder}")
+        self.train_lam = self.cfg.model.train_lam
+        self.train_action_encoder = self.cfg.model.train_action_encoder
 
-        self._keys_to_save = [
-            "epoch",
-        ]
-        self._keys_to_save += (
-            ["encoder", "encoder_optimizer"] if self.train_encoder else []
+        self.use_action_encoder = self.cfg.model.use_action_encoder
+        self.use_lam = self.cfg.model.use_lam
+
+        if self.use_action_encoder == self.use_lam:
+            raise ValueError("Invalid config: choose exactly one: model.use_action_encoder XOR model.use_lam")
+
+        if not self.use_action_encoder and self.train_action_encoder:
+            raise ValueError("train_action_encoder=True but use_action_encoder=False")
+        if not self.use_lam and self.train_lam:
+            raise ValueError("train_lam=True but use_lam=False")
+
+        log.info(
+            "Mode: use_action_encoder=%s use_lam=%s | train_encoder=%s train_predictor=%s train_decoder=%s train_action_encoder=%s train_lam=%s",
+            self.use_action_encoder, self.use_lam,
+            self.train_encoder, self.train_predictor, self.train_decoder,
+            self.train_action_encoder, self.train_lam
         )
-        self._keys_to_save += (
-            ["predictor", "predictor_optimizer"]
-            if self.train_predictor and self.cfg.has_predictor
-            else []
-        )
-        self._keys_to_save += (
-            ["decoder", "decoder_optimizer"] if self.train_decoder else []
-        )
-        self._keys_to_save += ["action_encoder"]
-        self._keys_to_save += [
-            "latent_action_model",
-            "latent_vq_model",
-            "latent_action_down",
-            "latent_optimizer",
-        ]
+
+        self._keys_to_save = ["epoch"]
+
+        if self.train_encoder:
+            self._keys_to_save += ["encoder", "encoder_optimizer"]
+
+        if self.cfg.has_predictor and self.train_predictor:
+            self._keys_to_save += ["predictor", "predictor_optimizer"]
+
+        if self.cfg.has_decoder and self.train_decoder:
+            self._keys_to_save += ["decoder", "decoder_optimizer"]
+
+        if self.use_action_encoder:
+            self._keys_to_save += ["action_encoder"]
+            if self.train_action_encoder:
+                self._keys_to_save += ["action_encoder_optimizer"]
+
+        if self.use_lam:
+            self._keys_to_save += ["latent_action_model", "vq_model", "latent_action_down"]
+            if self.train_lam:
+                self._keys_to_save += ["latent_optimizer"]
+
+
+
         self.init_models()
         self._init_latent_metric_analyzer()
         self.init_optimizers()
@@ -245,25 +258,8 @@ class Trainer:
         if metrics_cfg is None or not metrics_cfg.get("enabled", False):
             self.latent_metric_analyzer = None
             return
-
-        num_codes = getattr(self.latent_vq_model, "num_codes", None)
-        if num_codes is None:
-            log.warning("latent_vq_model is missing num_codes. Disabling latent metrics.")
-            self.latent_metric_analyzer = None
-            return
-
-        config = LatentMetricsConfig(
-            num_codes=num_codes,
-            max_samples=metrics_cfg.get("max_samples", 4096),
-            mi_k=metrics_cfg.get("mi_k", 5),
-            knn_k=metrics_cfg.get("knn_k", 10),
-            action_round_decimals=metrics_cfg.get("action_round_decimals", 3),
-            umap_points=metrics_cfg.get("umap_points", 2000),
-            umap_neighbors=metrics_cfg.get("umap_neighbors", 15),
-            umap_min_dist=metrics_cfg.get("umap_min_dist", 0.1),
-            seed=self.cfg.training.seed,
-        )
-        self.latent_metric_analyzer = LatentMetricsAggregator(config)
+        
+        pass #TODO
 
     def init_models(self):
         model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
@@ -280,20 +276,37 @@ class Trainer:
             for param in self.encoder.parameters():
                 param.requires_grad = False
 
+        # -------------------------
+        # action encoder (optional)
+        # -------------------------
+        if self.cfg.model.use_action_encoder:
+            if self.action_encoder is None:
+                self.action_encoder = hydra.utils.instantiate(
+                    self.cfg.action_encoder,
+                    in_chans=self.datasets["train"].action_dim,
+                    emb_dim=self.cfg.action_emb_dim,
+                )
 
-        self.action_encoder = hydra.utils.instantiate(
-            self.cfg.action_encoder,
-            in_chans=self.datasets["train"].action_dim,
-            emb_dim=self.cfg.action_emb_dim,
-        )
-        action_emb_dim = self.action_encoder.emb_dim
-        print(f"Action encoder type: {type(self.action_encoder)}")
+            action_emb_dim = self.action_encoder.emb_dim
+            log.info(f"Action encoder type: {type(self.action_encoder)}  emb_dim={action_emb_dim}")
 
-        self.action_encoder = self.accelerator.prepare(self.action_encoder)
+            # Freeze if you add a train_action_encoder flag; otherwise keep trainable by default.
+            # if not self.cfg.model.train_action_encoder:
+            #     for p in self.action_encoder.parameters():
+            #         p.requires_grad = False
 
-        if self.accelerator.is_main_process:
-            self.wandb_run.watch(self.action_encoder)
-        # initialize predictor
+            self.action_encoder = self.accelerator.prepare(self.action_encoder)
+
+            if self.accelerator.is_main_process:
+                self.wandb_run.watch(self.action_encoder)
+        else:
+            self.action_encoder = None
+            action_emb_dim = 0
+            log.info("Action encoder disabled (use_action_encoder=False).")
+
+        # -------------------------
+        # initialize predictor (dynamic dim)
+        # -------------------------
         if self.encoder.latent_ndim == 1:  # if feature is 1D
             num_patches = 1
         else:
@@ -304,17 +317,48 @@ class Trainer:
         if self.cfg.concat_dim == 0:
             num_patches += 2
 
+        # compute extra conditioning dim contributed by actions / latent actions
+        cond_dim_per_step = 0
+        if self.cfg.concat_dim != 0:
+            if self.cfg.model.use_action_encoder:
+                # action encoder produces embeddings of size action_emb_dim
+                cond_dim_per_step = action_emb_dim * self.cfg.num_action_repeat
+            elif self.cfg.model.use_lam:
+                # LAM produces latent action vectors; choose the correct dim for your implementation
+                # Option A: use configured latent_action_dim
+                cond_dim_per_step = self.cfg.model.latent_action_dim * self.cfg.num_action_repeat
+
+                # Option B (if your actual latent vector is codebook_splits * codebook_dim):
+                # cond_dim_per_step = (self.cfg.model.codebook_splits * self.cfg.model.codebook_dim) * self.cfg.num_action_repeat
+
+            else:
+                cond_dim_per_step = 0
+
+        predictor_dim = self.encoder.emb_dim + (cond_dim_per_step * self.cfg.concat_dim)
+
         if self.cfg.has_predictor:
             if self.predictor is None:
                 self.predictor = hydra.utils.instantiate(
                     self.cfg.predictor,
                     num_patches=num_patches,
                     num_frames=self.cfg.num_hist,
-                    dim=self.encoder.emb_dim + (action_emb_dim * self.cfg.num_action_repeat) * (self.cfg.concat_dim),
+                    dim=predictor_dim,
                 )
             if not self.train_predictor:
-                for param in self.predictor.parameters():
-                    param.requires_grad = False
+                for p in self.predictor.parameters():
+                    p.requires_grad = False
+
+        log.info(
+            "Predictor dim=%s (encoder=%s, cond_per_step=%s, concat_dim=%s, num_action_repeat=%s, use_action_encoder=%s, use_lam=%s)",
+            predictor_dim,
+            self.encoder.emb_dim,
+            cond_dim_per_step,
+            self.cfg.concat_dim,
+            self.cfg.num_action_repeat,
+            getattr(self.cfg.model, "use_action_encoder", None),
+            getattr(self.cfg.model, "use_lam", None),
+        )
+
 
         # initialize decoder
         if self.cfg.has_decoder:
@@ -341,92 +385,170 @@ class Trainer:
             self.encoder, self.predictor, self.decoder
         )
 
-        if self.latent_action_model is None:
-            self.latent_action_model = hydra.utils.instantiate(
-                self.cfg.latent_action_model,
-                in_dim=self.encoder.emb_dim,
-                model_dim=self.encoder.emb_dim,
-                patch_size=getattr(self.encoder, "patch_size", 1),
+        # -------------------------
+        # latent action model (LAM) (optional)
+        # -------------------------
+        if self.cfg.model.use_lam:
+            # instantiate only if missing (resume-from-ckpt friendly)
+            if self.latent_action_model is None:
+                self.latent_action_model = hydra.utils.instantiate(
+                    self.cfg.latent_action_model,
+                    in_dim=self.encoder.emb_dim,
+                    model_dim=self.encoder.emb_dim,
+                    patch_size=getattr(self.encoder, "patch_size", 1),
+                )
+
+            if self.vq_model is None:
+                self.vq_model = hydra.utils.instantiate(self.cfg.latent_vq_model)
+
+            # latent dim (keep your existing logic)
+            latent_dim = (
+                self.cfg.model.codebook_splits * self.cfg.model.codebook_dim
+                if hasattr(self.cfg.model, "codebook_splits")
+                else self.cfg.model.latent_action_dim
             )
-        if self.latent_vq_model is None:
-            self.latent_vq_model = hydra.utils.instantiate(
-                self.cfg.latent_vq_model,
+            if self.latent_action_down is None:
+                self.latent_action_down = nn.Linear(self.encoder.emb_dim, latent_dim)
+
+            # Freeze LAM params if not training (same pattern as encoder/predictor/decoder)
+            if not self.train_lam:
+                for module in [self.latent_action_model, self.vq_model, self.latent_action_down]:
+                    for p in module.parameters():
+                        p.requires_grad = False
+
+            # Prepare LAM modules (device/DDP)
+            (
+                self.latent_action_model,
+                self.vq_model,
+                self.latent_action_down,
+            ) = self.accelerator.prepare(
+                self.latent_action_model,
+                self.vq_model,
+                self.latent_action_down,
             )
 
-        latent_dim = (
-            self.cfg.model.codebook_splits * self.cfg.model.codebook_dim
-            if hasattr(self.cfg.model, "codebook_splits")
-            else self.cfg.model.latent_action_dim
-        )
-        if self.latent_action_down is None:
-            self.latent_action_down = nn.Linear(self.encoder.emb_dim, latent_dim)
+            log.info(
+                "LAM enabled (use_lam=True). train_lam=%s, latent_dim=%s",
+                self.train_lam,
+                latent_dim,
+            )
+        else:
+            self.latent_action_model = None
+            self.vq_model = None
+            self.latent_action_down = None
+            log.info("LAM disabled (use_lam=False).")
 
-        (
-            self.latent_action_model,
-            self.latent_vq_model,
-            self.latent_action_down,
-            self.latent_action_up,
-        ) = self.accelerator.prepare(
-            self.latent_action_model,
-            self.latent_vq_model,
-            self.latent_action_down,
-            self.latent_action_up,
-        )
-
-        self.model = hydra.utils.instantiate(
-            self.cfg.model,
+        model_kwargs = dict(
+            image_size=self.cfg.img_size,
+            num_hist=self.cfg.num_hist,
+            num_pred=self.cfg.num_pred,
             encoder=self.encoder,
-            action_encoder=self.action_encoder,
-            predictor=self.predictor,
             decoder=self.decoder,
-            action_dim=action_emb_dim,
+            predictor=self.predictor,
+            codebook_splits=self.cfg.model.codebook_splits,
+            codebook_dim=self.cfg.model.codebook_dim,
+            action_dim=(action_emb_dim if self.action_encoder is not None else 0),
             concat_dim=self.cfg.concat_dim,
+            latent_action_dim=self.cfg.model.latent_action_dim,
             num_action_repeat=self.cfg.num_action_repeat,
-            latent_action_model=self.latent_action_model,
-            latent_vq_model=self.latent_vq_model,
-            latent_action_down=self.latent_action_down,
+            train_encoder=self.train_encoder,
+            train_predictor=self.train_predictor,
+            train_decoder=self.train_decoder,
+            train_lam=self.train_lam,
         )
-        self.model.latent_action_down = self.model.latent_action_down.to(self.device)
+
+        if self.action_encoder is not None:
+            model_kwargs["action_encoder"] = self.action_encoder
+
+        if self.latent_action_model is not None:
+            model_kwargs["latent_action_model"] = self.latent_action_model
+        if self.vq_model is not None:
+            model_kwargs["vq_model"] = self.vq_model
+        if self.latent_action_down is not None:
+            model_kwargs["latent_action_down"] = self.latent_action_down
+
+        self.model = hydra.utils.instantiate(self.cfg.model, **model_kwargs)
+
+
 
     def init_optimizers(self):
-        self.encoder_optimizer = torch.optim.Adam(
-            self.encoder.parameters(),
-            lr=self.cfg.training.encoder_lr,
-        )
-        self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
-        if self.cfg.has_predictor:
+        # -------------------------
+        # Encoder optimizer
+        # -------------------------
+        self.encoder_optimizer = None
+        if self.train_encoder:
+            self.encoder_optimizer = torch.optim.Adam(
+                self.encoder.parameters(),
+                lr=self.cfg.training.encoder_lr,
+            )
+            self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
+
+        # -------------------------
+        # Predictor optimizer
+        # -------------------------
+        self.predictor_optimizer = None
+        if self.cfg.has_predictor and self.predictor is not None and self.train_predictor:
             self.predictor_optimizer = torch.optim.AdamW(
                 self.predictor.parameters(),
                 lr=self.cfg.training.predictor_lr,
             )
-            self.predictor_optimizer = self.accelerator.prepare(
-                self.predictor_optimizer
-            )
+            self.predictor_optimizer = self.accelerator.prepare(self.predictor_optimizer)
 
-            self.action_encoder_optimizer = torch.optim.AdamW(
+        # -------------------------
+        # Action encoder optimizer (baseline mode)
+        # -------------------------
+        self.action_encoder_optimizer = None
+        if self.cfg.model.use_action_encoder:
+            if self.action_encoder is None:
+                raise RuntimeError("use_action_encoder=True but action_encoder is None.")
+            if self.train_action_encoder:
+                self.action_encoder_optimizer = torch.optim.AdamW(
                     self.action_encoder.parameters(),
-                lr=self.cfg.training.action_encoder_lr,
-            )
-            self.action_encoder_optimizer = self.accelerator.prepare(
-                self.action_encoder_optimizer
-            )
+                    lr=self.cfg.training.action_encoder_lr,
+                )
+                self.action_encoder_optimizer = self.accelerator.prepare(
+                    self.action_encoder_optimizer
+                )
 
-        if self.cfg.has_decoder:
+        # -------------------------
+        # Decoder optimizer
+        # -------------------------
+        self.decoder_optimizer = None
+        if self.cfg.has_decoder and self.decoder is not None and self.train_decoder:
             self.decoder_optimizer = torch.optim.Adam(
-                self.decoder.parameters(), lr=self.cfg.training.decoder_lr
+                self.decoder.parameters(),
+                lr=self.cfg.training.decoder_lr,
             )
             self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
 
-        latent_params = itertools.chain(
-            self.latent_action_model.parameters(),
-            self.latent_vq_model.parameters(),
-            self.latent_action_down.parameters(),
-        )
-        self.latent_optimizer = torch.optim.AdamW(
-            latent_params,
-            lr=self.cfg.training.latent_lr,
-        )
-        self.latent_optimizer = self.accelerator.prepare(self.latent_optimizer)
+        # -------------------------
+        # LAM optimizer (LAM mode)
+        # -------------------------
+        self.latent_optimizer = None
+        if self.cfg.model.use_lam and self.train_lam:
+            if (
+                self.latent_action_model is None
+                or self.vq_model is None
+                or self.latent_action_down is None
+            ):
+                raise RuntimeError(
+                    "train_lam=True but one or more LAM modules are None "
+                    f"(latent_action_model={self.latent_action_model is not None}, "
+                    f"vq_model={self.vq_model is not None}, "
+                    f"latent_action_down={self.latent_action_down is not None})."
+                )
+
+            latent_params = itertools.chain(
+                self.latent_action_model.parameters(),
+                self.vq_model.parameters(),
+                self.latent_action_down.parameters(),
+            )
+            self.latent_optimizer = torch.optim.AdamW(
+                latent_params,
+                lr=self.cfg.training.latent_lr,
+            )
+            self.latent_optimizer = self.accelerator.prepare(self.latent_optimizer)
+
 
     def monitor_jobs(self, lock):
         """

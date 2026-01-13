@@ -54,29 +54,41 @@ class TrajSlicerDataset(TrajDataset):
     def __init__(
         self,
         dataset: TrajDataset,
+        *,
         num_frames: int,
-        frameskip: int = 1,
-        process_actions: str = "concat",
+        frameskip: int,
+        process_actions: str,
     ):
         self.dataset = dataset
         self.num_frames = num_frames
         self.frameskip = frameskip
+        self.process_actions = process_actions
+
+        if self.frameskip < 1:
+            raise ValueError(f"frameskip must be >= 1, got {self.frameskip}")
+        if self.num_frames < 1:
+            raise ValueError(f"num_frames must be >= 1, got {self.num_frames}")
+        if self.process_actions not in {"concat", "subsample"}:
+            raise ValueError(
+                f"process_actions must be one of {{'concat','subsample'}}, got {self.process_actions}"
+            )
 
         self.slices = []
         for i in range(len(self.dataset)):
             T = self.dataset.get_seq_length(i)
-            if T - num_frames < 0:
-                print(f"Ignored short sequence #{i}: len={T}, num_frames={num_frames}")
+            window = self.num_frames * self.frameskip
+            if T - self.num_frames < 0:
+                print(f"Ignored short sequence #{i}: len={T}, num_frames={self.num_frames}")
             else:
                 self.slices += [
-                    (i, start, start + num_frames * self.frameskip)
-                    for start in range(T - num_frames * frameskip + 1)
+                    (i, start, start + window)
+                    for start in range(T - window + 1)
                 ]
 
         self.proprio_dim = getattr(self.dataset, "proprio_dim", 0)
         self.state_dim = getattr(self.dataset, "state_dim", 0)
 
-        if process_actions == "concat":
+        if self.process_actions == "concat":
             self.action_dim = self.dataset.action_dim * self.frameskip
         else:
             self.action_dim = self.dataset.action_dim
@@ -90,7 +102,6 @@ class TrajSlicerDataset(TrajDataset):
     def __getitem__(self, idx):
         i, start, end = self.slices[idx]
 
-        # base dataset returns: obs, act, state, info
         obs, act, state, _ = self.dataset[i]
 
         for k, v in obs.items():
@@ -98,10 +109,18 @@ class TrajSlicerDataset(TrajDataset):
 
         state = state[start:end:self.frameskip]
 
-        act = act[start:end]
-        act = rearrange(act, "(n f) d -> n (f d)", n=self.num_frames)
+        act_window = act[start:end]  # length = num_frames * frameskip
+
+        if self.process_actions == "concat":
+            act = rearrange(
+                act_window, "(n f) d -> n (f d)",
+                n=self.num_frames,
+            )
+        else:  # "subsample"
+            act = act_window[::self.frameskip]
 
         return obs, act, state
+
 
 
 
@@ -128,7 +147,7 @@ def random_split_traj(
     ]
 
 
-def split_traj_datasets(dataset, train_fraction=0.95, random_seed=42):
+def split_traj_datasets(dataset, train_fraction, random_seed):
     dataset_length = len(dataset)
     lengths = [
         int(train_fraction * dataset_length),
@@ -142,10 +161,10 @@ def split_traj_datasets(dataset, train_fraction=0.95, random_seed=42):
 
 def get_train_val_sliced(
     traj_dataset: TrajDataset,
-    train_fraction: float = 0.9,
-    random_seed: int = 42,
-    num_frames: int = 10,
-    frameskip: int = 1,
+    train_fraction: float ,
+    random_seed: int ,
+    num_frames: int ,
+    frameskip: int,
 ):
     train, val = split_traj_datasets(
         traj_dataset,
