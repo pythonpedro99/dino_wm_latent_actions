@@ -22,14 +22,20 @@ class VWorldModel(nn.Module):
         train_predictor,
         train_decoder,
         train_lam,
+        use_action_encoder,
+        use_lam,
+        use_vq,
         action_encoder=None,
         latent_action_model=None,
         vq_model=None,
-        latent_action_down=None,
+        latent_action_down=None
     ):
         super().__init__()
-        self.num_hist = num_hist
-        self.num_pred = num_pred
+
+        self.use_action_encoder = use_action_encoder
+        self.use_lam = use_lam
+        self.use_vq = use_vq
+
         self.encoder = encoder
         self.action_encoder = action_encoder
         self.decoder = decoder  # decoder could be None
@@ -37,16 +43,49 @@ class VWorldModel(nn.Module):
         self.latent_action_model = latent_action_model
         self.vq_model = vq_model
         self.latent_action_down = latent_action_down
+
+        self.train_lam = train_lam
         self.train_encoder = train_encoder
         self.train_predictor = train_predictor
         self.train_decoder = train_decoder
+
+        if self.use_action_encoder == self.use_lam:
+            raise ValueError("Invalid config: choose exactly one: use_action_encoder XOR use_lam")
+
+        if self.use_action_encoder and self.action_encoder is None:
+            raise ValueError("use_action_encoder=True but action_encoder is None")
+
+        if self.use_lam:
+            if self.latent_action_model is None or self.latent_action_down is None:
+                raise ValueError("use_lam=True but latent_action_model or latent_action_down is None")
+            if self.use_vq and self.vq_model is None:
+                raise ValueError("use_vq=True but vq_model is None")
+
+        self.num_hist = num_hist
+        self.num_pred = num_pred
         self.num_action_repeat = num_action_repeat 
-        self.action_dim = action_dim * num_action_repeat 
-        self.emb_dim = self.encoder.emb_dim + (self.action_dim ) * (concat_dim) # Not used
-        self.latent_action_dim = latent_action_dim
         self.encoder_emb_dim = self.encoder.emb_dim
         self.codebook_splits = codebook_splits
         self.codebook_dim = codebook_dim
+        self.num_action_repeat = num_action_repeat
+        self.latent_action_dim = latent_action_dim
+
+        # Canonical per-step action feature dim (before repeat)
+        if self.use_action_encoder:
+            # Prefer the actual module attribute if present
+            self.act_feat_dim = getattr(self.action_encoder, "emb_dim", action_dim)
+        else:
+            if self.use_vq:
+                # VQ quantizes vectors of size codebook_splits * code_dim
+                self.act_feat_dim = self.codebook_splits * self.codebook_dim
+            else:
+                self.act_feat_dim = latent_action_dim
+
+        # This is the dimension that appears in z when concat_dim==1
+        self.action_dim = self.act_feat_dim * self.num_action_repeat
+        self.emb_dim = self.encoder.emb_dim + (self.action_dim if self.concat_dim == 1 else 0)
+
+
 
         print(f"num_action_repeat: {self.num_action_repeat}")
         print(f"action encoder: {action_encoder}")
@@ -84,7 +123,8 @@ class VWorldModel(nn.Module):
             self.encoder.train(mode)
         if self.predictor is not None and self.train_predictor:
             self.predictor.train(mode)
-        self.action_encoder.train(mode)
+        if self.action_encoder is not None:
+            self.action_encoder.train(mode)
         if self.decoder is not None and self.train_decoder:
             self.decoder.train(mode)
 
@@ -93,166 +133,61 @@ class VWorldModel(nn.Module):
         self.encoder.eval()
         if self.predictor is not None:
             self.predictor.eval()
-        self.action_encoder.eval()
+        if self.action_encoder is not None:
+            self.action_encoder.eval()
         if self.decoder is not None:
             self.decoder.eval()
 
     def encode(self, obs, act):
-        # Encode observation
         z_dct = self.encode_obs(obs)
-        act = self.encode_act(act)
+        z_visual = z_dct["visual"]  # (B, T, P, D)
 
-        # ----- latent actions (z_a, z_a_down, z_q) -----
-        # z_a: output of latent_action_model before downsampling
-        z_a = self.latent_action_model(z_dct["visual"])["action_patches"]           # (B, T, F?, A)
-        z_a_down = self.latent_action_down(z_a)                                     # (B, T, 1, A) typically
+        vq_outputs = None
+        latent_actions = None
+        quantized_latent_actions = None
 
-        # Temporal shift / re-alignment as before
-        z_a_down_shifted = torch.cat(
-            [z_a_down[:, 1:, :, :], z_a_down[:, -1:, :, :]],
-            dim=1
-        )
+        if self.use_action_encoder:
+            act_base = self.encode_act(act)  # (B, T, A)
 
-        vq_outputs = self.vq_model(z_a_down_shifted)
-        quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)                  # z_q: (B, T, A)
-        vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)                    # (B, T)
+        else:
+            # ----- latent actions (continuous) -----
+            z_a = self.latent_action_model(z_visual)["action_patches"]  # (B, T, F?, A0)
+            z_a_down = self.latent_action_down(z_a)                     # (B, T, 1, A)
+
+            z_a_down_shifted = torch.cat([z_a_down[:, 1:], z_a_down[:, -1:]], dim=1)  # (B, T, 1, A)
+            latent_actions = z_a_down_shifted.squeeze(2)                               # (B, T, A)
+
+            if self.use_vq:
+                vq_outputs = self.vq_model(z_a_down_shifted)
+                quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)             # (B, T, A)
+                vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)               # (B, T)
+                act_base = quantized_latent_actions
+            else:
+                # no VQ: use continuous latent actions for conditioning
+                act_base = latent_actions
+
+        assert act_base.shape[-1] == self.act_feat_dim, (act_base.shape, self.act_feat_dim)
 
         # ----- concat modes -----
         if self.concat_dim == 0:
-            # concat along token-dim; use quantized actions as before
-            act_token = quantized_latent_actions.unsqueeze(2)                       # (B, T, 1, A)
-            z = torch.cat([z_dct["visual"], act_token], dim=2)
+            act_token = act_base.unsqueeze(2)  # (B, T, 1, A)
+            z = torch.cat([z_visual, act_token], dim=2)
 
         elif self.concat_dim == 1:
-            # concat along feature-dim; gate between z_a_down and z_q per flag
-            
-
-            # decide which latent action representation to use
-            use_z_q = getattr(self, "use_z_q_in_concat", False)
-            if use_z_q:
-                act_base = quantized_latent_actions                                  # (B, T, A)
-            else:
-                act_base = z_a_down_shifted.squeeze(2)                               # (B, T, A) from z_a_down
-
-            act_tiled = repeat(
-                act_base.unsqueeze(2), "b t 1 a -> b t f a",
-                f=z_dct["visual"].shape[2]
-            )
+            act_tiled = repeat(act_base.unsqueeze(2), "b t 1 a -> b t p a", p=z_visual.shape[2])
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
+            z = torch.cat([z_visual, act_repeated], dim=3)
 
-            z = torch.cat([z_dct["visual"], act_repeated], dim=3)
         else:
             raise ValueError(f"Unsupported concat_dim: {self.concat_dim}")
 
-        # ----- stats every X steps -----
-        # hardcoded interval, using a self.counter as requested
-        LOG_INTERVAL = 50
-        if not hasattr(self, "counter"):
-            self.counter = 0
-        self.counter += 1
-
-        if self.counter % LOG_INTERVAL == 0:
-            with torch.no_grad():
-                stats = {}
-
-                def add_tensor_stats(name, t):
-                    # Flatten everything except last dim
-                    t_flat = t.reshape(-1, t.shape[-1])
-                    stats[f"{name}_mean"] = float(t_flat.mean().item())
-                    stats[f"{name}_std"] = float(t_flat.std().item())
-
-                    dim_zero_frac = (t_flat == 0).float().mean(dim=0)  # (D,)
-                    # store full vector for later programmatic logging, but don't print full vector
-                    stats[f"{name}_dim_zero_frac"] = dim_zero_frac.detach().cpu()
-
-                    # compact scalar summaries for printing
-                    stats[f"{name}_dim_zero_frac_mean"] = float(dim_zero_frac.mean().item())
-                    stats[f"{name}_dim_zero_frac_max"] = float(dim_zero_frac.max().item())
-
-                # z_a: pre-downsample, z_a_down: after downsample+shift, z_q: quantized
-                add_tensor_stats("z_a", z_a)
-                add_tensor_stats("z_a_down", z_a_down_shifted.squeeze(2))
-                add_tensor_stats("z_q", quantized_latent_actions)
-
-                # VQ loss (if present)
-                if isinstance(vq_outputs, dict) and ("loss" in vq_outputs) and (vq_outputs["loss"] is not None):
-                    vq_loss_val = vq_outputs["loss"]
-                    stats["vq_loss"] = float(vq_loss_val.detach().float().mean().cpu().item())
-
-                # code usage statistics from indices
-                indices = vq_outputs.get("indices", None) if isinstance(vq_outputs, dict) else None
-                if indices is not None:
-                    idx_flat = indices.reshape(-1).detach()
-
-                    # infer codebook size if not explicitly stored
-                    codebook_size = getattr(
-                        self.vq_model,
-                        "num_embeddings",
-                        int(idx_flat.max().item()) + 1 if idx_flat.numel() > 0 else 0,
-                    )
-
-                    if codebook_size > 0 and idx_flat.numel() > 0:
-                        counts = torch.bincount(idx_flat, minlength=codebook_size)  # (num_codes,)
-                        stats["code_counts"] = counts.detach().cpu()
-
-                        used = (counts > 0).sum().item()
-                        stats["num_used_codes"] = int(used)
-
-                        total = counts.sum().item()
-                        if total > 0:
-                            probs = counts.float() / counts.sum()
-                            nonzero = probs > 0
-                            entropy = -(probs[nonzero] * probs[nonzero].log()).sum()
-                            stats["code_entropy"] = float(entropy.detach().cpu().item())
-                        else:
-                            stats["code_entropy"] = 0.0
-
-                        # compact summaries for printing
-                        stats["code_topk_counts"] = (
-                            torch.topk(counts, k=min(5, counts.numel())).values.detach().cpu().tolist()
-                        )
-                    else:
-                        stats["num_used_codes"] = 0
-                        stats["code_entropy"] = 0.0
-                        stats["code_topk_counts"] = []
-                else:
-                    stats["num_used_codes"] = 0
-                    stats["code_entropy"] = 0.0
-                    stats["code_topk_counts"] = []
-
-                # attach to vq_outputs so caller can log them
-                vq_outputs["stats"] = stats
-
-                # ---- SAFE PRINT (rank 0 only) ----
-                is_rank0 = True
-                if torch.distributed.is_available() and torch.distributed.is_initialized():
-                    is_rank0 = (torch.distributed.get_rank() == 0)
-
-                if is_rank0:
-                    msg = (
-                        f"[encode stats @ {self.counter}] "
-                        f"z_a(mean={stats['z_a_mean']:.4f}, std={stats['z_a_std']:.4f}, "
-                        f"zero_frac_mean={stats['z_a_dim_zero_frac_mean']:.4f}, zero_frac_max={stats['z_a_dim_zero_frac_max']:.4f}) | "
-                        f"z_a_down(mean={stats['z_a_down_mean']:.4f}, std={stats['z_a_down_std']:.4f}, "
-                        f"zero_frac_mean={stats['z_a_down_dim_zero_frac_mean']:.4f}, zero_frac_max={stats['z_a_down_dim_zero_frac_max']:.4f}) | "
-                        f"z_q(mean={stats['z_q_mean']:.4f}, std={stats['z_q_std']:.4f}, "
-                        f"zero_frac_mean={stats['z_q_dim_zero_frac_mean']:.4f}, zero_frac_max={stats['z_q_dim_zero_frac_max']:.4f}) | "
-                        f"vq_loss={stats.get('vq_loss', float('nan')):.4f} | "
-                        f"used_codes={stats['num_used_codes']} entropy={stats['code_entropy']:.4f} "
-                        f"top5_counts={stats.get('code_topk_counts', [])}"
-                    )
-                    print(msg, flush=True)
-
-
         return {
             "z": z,
-            "vq_outputs": vq_outputs,
-            "latent_actions": z_a_down_shifted.squeeze(2),          # z_a_down (as before, but explicit)
-            "quantized_latent_actions": quantized_latent_actions,   # z_q
-            "visual_embs": z_dct["visual"],
+            "vq_outputs": vq_outputs,                        
+            "latent_actions": latent_actions,                 
+            "quantized_latent_actions": quantized_latent_actions, 
+            "visual_embs": z_visual,
         }
-
-
 
 
     def encode_act(self, act):
@@ -339,15 +274,16 @@ class VWorldModel(nn.Module):
         encode_output = self.encode(obs, act)  
         z = encode_output["z"]  # (b, num_frames, num_patches, emb_dim)
         vq_output = encode_output["vq_outputs"]
-        loss_components["vq_loss"] = vq_output["loss"]
+        if vq_output is not None and ("loss" in vq_output) and (vq_output["loss"] is not None):
+            loss_components["idm_vq_loss"] = vq_output["loss"]
 
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
-        visual_src = obs['visual'][:, : self.num_hist, ...]  # (b, num_hist, 3, img_size, img_size)
         visual_tgt = obs['visual'][:, self.num_pred :, ...]  # (b, num_hist, 3, img_size, img_size)
 
         if self.predictor is not None:
             z_pred = self.predict(z_src)
+
             if self.decoder is not None:
                 obs_pred, diff_pred = self.decode(
                     z_pred.detach()
@@ -363,22 +299,24 @@ class VWorldModel(nn.Module):
             else:
                 visual_pred = None
 
-            # Compute loss for visual, proprio dims (i.e. exclude action dims)
+            # Predict visual latents only (actions are conditioning; do not include them in the target loss)
             if self.concat_dim == 0:
-                z_visual_loss = self.emb_criterion(z_pred[:, :, :-1, :], z_tgt[:, :, :-1, :].detach())
-                z_loss = z_visual_loss
+                # action is appended as an extra token (last token)
+                pred_visual_latents = z_pred[:, :, :-1, :]               # (B, H, P, D)
+                tgt_visual_latents  = z_tgt[:, :, :-1, :].detach()
 
             elif self.concat_dim == 1:
-                z_visual_loss = self.emb_criterion(
-                    z_pred[:, :, :, :-self.action_dim],
-                    z_tgt[:, :, :, :-self.action_dim].detach()
-                )
-                z_loss = z_visual_loss
+                # action is appended to feature dim (last self.action_dim channels)
+                pred_visual_latents = z_pred[:, :, :, :-self.action_dim] # (B, H, P, D_vis)
+                tgt_visual_latents  = z_tgt[:, :, :, :-self.action_dim].detach()
 
+            else:
+                raise ValueError(f"Unsupported concat_dim: {self.concat_dim}")
 
-            loss = loss + z_loss
-            loss_components["z_loss"] = z_loss
-            loss_components["z_visual_loss"] = z_visual_loss
+            visual_latent_pred_loss = self.emb_criterion(pred_visual_latents, tgt_visual_latents)
+
+            loss = loss + visual_latent_pred_loss
+            loss_components["visual_latent_pred_loss"] = visual_latent_pred_loss
         else:
             visual_pred = None
             z_pred = None
@@ -404,7 +342,7 @@ class VWorldModel(nn.Module):
             loss = loss + decoder_loss_reconstructed
         else:
             visual_reconstructed = None
-        loss_components["loss"] = loss
+
         return z_pred, visual_pred, visual_reconstructed, loss, loss_components, encode_output
 
     def replace_actions_from_z(self, z, act):
@@ -416,38 +354,68 @@ class VWorldModel(nn.Module):
             z[..., -self.action_dim:] = act_repeated
         return z
 
-
-
     def rollout(self, obs, act, num_obs_init):
         """
+        Roll out predictions in latent space by iteratively predicting next latents and
+        injecting the corresponding action conditioning.
+
         input:
-            obs  (dict): (b, t+n, 3, H, W)  # FULL trajectory
-            act  (tensor): ignored (API compatibility)
-            num_obs_init (int): how many initial frames act as context
+            obs  (dict): full trajectory (B, T, C, H, W)
+            act  (tensor): provided actions (B, T, A_raw) in baseline mode; ignored in LAM mode
+            num_obs_init (int): number of initial frames to use as context
 
         output:
-            z_obses, z
+            z_obses: dict of predicted visual latents
+            z: full latent sequence (including action conditioning representation)
         """
         encode_output = self.encode(obs, act)
-        #latent_actions = encode_output["latent_actions"][:, :-1]  # (b, t+n-1, latent_action_dim)
-        quantized_latent_actions = encode_output["quantized_latent_actions"][:, :-1]  # (b, t+n-1, latent_action_dim)
 
-        z = encode_output["z"][:, :num_obs_init]
-        act = quantized_latent_actions #self.encode_act(act)
-        action = act[:, num_obs_init:]
+        # Use only the initial context frames from encoded latents
+        z = encode_output["z"][:, :num_obs_init]  # (B, num_obs_init, ...)
 
+        # ------------------------------------------------------------------
+        # Select the action stream to condition rollout on
+        # We want one action vector per timestep, aligned with frames.
+        # We drop the last action because there are (T-1) transitions for T frames.
+        # ------------------------------------------------------------------
+        if self.use_lam:
+            if self.use_vq:
+                actions_all = encode_output["quantized_latent_actions"]
+                if actions_all is None:
+                    raise RuntimeError("use_lam=True,use_vq=True but quantized_latent_actions is None.")
+            else:
+                actions_all = encode_output["latent_actions"]
+                if actions_all is None:
+                    raise RuntimeError("use_lam=True,use_vq=False but latent_actions is None.")
+        else:
+            # baseline: use provided actions
+            actions_all = self.encode_act(act)
+
+        # (B, T-1, A) transitions
+        actions_all = actions_all[:, :-1, :]
+
+        # Actions to apply after the context frames
+        # For frame index k >= num_obs_init, we use action index k-1 (transition into that frame).
+        # With your existing logic, you condition step-by-step starting at k=num_obs_init.
+        action = actions_all[:, num_obs_init:, :]  # (B, rollout_steps, A)
+
+        # ------------------------------------------------------------------
+        # Iterative rollout
+        # ------------------------------------------------------------------
         t = 0
         inc = 1
         while t < action.shape[1]:
-            z_pred = self.predict(z[:, -self.num_hist:])
-            z_new = z_pred[:, -inc:, ...]
-            z_new = self.replace_actions_from_z(z_new, action[:, t:t + inc, :])
+            z_pred = self.predict(z[:, -self.num_hist:])      # predict on the last num_hist frames
+            z_new = z_pred[:, -inc:, ...]                     # take newest predicted frame(s)
+            z_new = self.replace_actions_from_z(z_new, action[:, t:t + inc, :])  # inject action
             z = torch.cat([z, z_new], dim=1)
             t += inc
 
+        # Optional: one extra prediction without injecting an action (matches your current behavior)
         z_pred = self.predict(z[:, -self.num_hist:])
         z_new = z_pred[:, -1:, ...]
         z = torch.cat([z, z_new], dim=1)
 
-        z_obses, z_acts = self.separate_emb(z)
+        z_obses, _ = self.separate_emb(z)
         return z_obses, z
+

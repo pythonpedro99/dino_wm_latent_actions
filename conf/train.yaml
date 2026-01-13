@@ -46,7 +46,7 @@ training:
 
 img_size: 224 # should be a multiple of 224
 frameskip: 5
-concat_dim: 1 # change to 0 for concat along token dim, 1 for feature dim 
+concat_dim: 1  # only supports 1 
 
 normalize_action: True
 
@@ -69,6 +69,7 @@ model:
   # mode selection (XOR with use_action_encoder)
   use_action_encoder: false
   use_lam: true
+  use_vq: true
 
   # dimensions / sequence
   image_size: ${img_size}

@@ -20,9 +20,9 @@ class VectorQuantizerEMA(nn.Module):
         self,
         num_codes: int,
         code_dim: int,
-        codebook_splits: int = 1,
-        ema_decay: float = 0.99,
-        commitment: float = 0.25,
+        codebook_splits: int,
+        ema_decay: float,
+        commitment: float,
     ):
         super().__init__()
         self.code_dim = code_dim
