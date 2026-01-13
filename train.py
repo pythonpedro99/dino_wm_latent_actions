@@ -25,7 +25,6 @@ from hydra.core.hydra_config import HydraConfig
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
-from metrics.latent_metrics import LatentMetricsAggregator, LatentMetricsConfig
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 
 warnings.filterwarnings("ignore")
@@ -213,15 +212,11 @@ class Trainer:
             if self.train_lam:
                 self._keys_to_save += ["latent_optimizer"]
 
-
-
         self.init_models()
-        self._init_latent_metric_analyzer()
         self.init_optimizers()
 
         self.epoch_log = OrderedDict()
-        if self.accelerator.is_main_process:
-            self._setup_step_logger()
+        
 
 
     def save_ckpt(self):
@@ -252,14 +247,6 @@ class Trainer:
         not_in_ckpt = set(self._keys_to_save) - set(ckpt.keys())
         if len(not_in_ckpt):
             log.warning("Keys not found in ckpt: %s", not_in_ckpt)
-
-    def _init_latent_metric_analyzer(self):
-        metrics_cfg = getattr(self.cfg, "metrics", None)
-        if metrics_cfg is None or not metrics_cfg.get("enabled", False):
-            self.latent_metric_analyzer = None
-            return
-        
-        pass #TODO
 
     def init_models(self):
         model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
@@ -708,20 +695,6 @@ class Trainer:
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
-
-            if (
-                self.log_every_x_steps > 0
-                and self.global_step % self.log_every_x_steps == 0
-                and self.cfg.has_predictor
-            ):
-                self.log_train_errors(z_out, obs)
-
-            if self.val_every_x_steps > 0 and self.global_step % self.val_every_x_steps == 0:
-                self.val()
-                self.logs_flash(step=self.global_step)
-
-
-
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
@@ -777,33 +750,17 @@ class Trainer:
                     phase="train",
                 )
 
-            loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
+            loss_components = {f"train_{k}": [v] for k, v in loss_components.items()} #TODO
             self.logs_update(loss_components)
 
     def val(self):
         self.model.eval()
-        if self.latent_metric_analyzer is not None and self.accelerator.is_main_process:
-            self.latent_metric_analyzer.reset()
-        val_file_metrics = []
         if len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
             with torch.no_grad():
-                train_rollout_logs = self.openloop_rollout(
-                    self.train_traj_dset, mode="train"
-                )
-                train_rollout_logs = {
-                    f"train_{k}": [v] for k, v in train_rollout_logs.items()
-                }
-                val_file_metrics.append(
-                    {key: float(values[0]) for key, values in train_rollout_logs.items()}
-                )
-                self.logs_update(train_rollout_logs)
                 val_rollout_logs = self.openloop_rollout(self.val_traj_dset, mode="val")
                 val_rollout_logs = {
                     f"val_{k}": [v] for k, v in val_rollout_logs.items()
                 }
-                val_file_metrics.append(
-                    {key: float(values[0]) for key, values in val_rollout_logs.items()}
-                )
                 self.logs_update(val_rollout_logs)
 
         self.accelerator.wait_for_everyone()
@@ -824,20 +781,11 @@ class Trainer:
             )
 
             loss = self.accelerator.gather_for_metrics(loss).mean()
-            loss_scalar = loss.item()
 
             loss_components = self.accelerator.gather_for_metrics(loss_components)
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
-            batch_file_metrics = {"val_loss": loss_scalar}
-            batch_file_metrics.update({f"val_{k}": v for k, v in loss_components.items()})
-
-            self.update_latent_metrics(
-                encode_output=encode_output,
-                act=act,
-                z_out=z_out,
-            )
 
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
@@ -852,10 +800,6 @@ class Trainer:
                         key: value.mean().item() for key, value in err_logs.items()
                     }
                     err_logs = {f"val_{k}": [v] for k, v in err_logs.items()}
-
-                    batch_file_metrics.update(
-                        {key: values[0] for key, values in err_logs.items()}
-                    )
 
                     self.logs_update(err_logs)
 
@@ -900,32 +844,7 @@ class Trainer:
                 )
             loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
-            val_file_metrics.append(batch_file_metrics)
 
-        if (
-            self.latent_metric_analyzer is not None
-            and self.accelerator.is_main_process
-        ):
-            latent_metrics, latent_figs = self.latent_metric_analyzer.compute()
-            for key, value in latent_metrics.items():
-                if isinstance(value, (list, tuple, np.ndarray)):
-                    continue
-                if not isinstance(value, numbers.Number):
-                    continue
-                if math.isnan(value):
-                    continue
-                self.logs_update({f"val_{key}": [float(value)]})
-                val_file_metrics.append({f"val_{key}": float(value)})
-            if self.wandb_run is not None:
-                for fig_name, fig in latent_figs.items():
-                    if fig is None:
-                        continue
-                    self.wandb_run.log(
-                        {f"val_{fig_name}": wandb.Image(fig), "epoch": self.epoch}
-                    )
-                    plt.close(fig)
-
-        
 
     def openloop_rollout(
             self, dset, num_rollout=8, rand_start_end=True, min_horizon=2, mode="train"
@@ -1021,89 +940,8 @@ class Trainer:
         err_logs = self.accelerator.gather_for_metrics(err_logs)
         err_logs = {key: value.mean().item() for key, value in err_logs.items()}
         err_logs = {f"train_{k}": [v] for k, v in err_logs.items()}
-
-        printable_logs = ", ".join(
-            f"{key}={values[0]:.4f}" for key, values in err_logs.items()
-        )
-        self._log_step_message(
-            f"[step {self.global_step}] Train embedding errors: {printable_logs}"
-        )
-
-        metrics_for_file = {key: values[0] for key, values in err_logs.items()}
-        self._log_metrics_to_file(
-            step=self.global_step, phase="train_errors", metrics=metrics_for_file
-        )
-
         self.logs_update(err_logs)
 
-
-    def _setup_step_logger(self):
-        self.step_logger = logging.getLogger("train_step_logger")
-        self.step_logger.setLevel(logging.INFO)
-        self.step_logger.propagate = False
-
-        if self.step_logger.handlers:
-            return
-
-        formatter = logging.Formatter("%(asctime)s - %(message)s")
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(formatter)
-        self.step_logger.addHandler(stream_handler)
-
-        log_file = Path(os.getcwd()) / "training.log"
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(formatter)
-        self.step_logger.addHandler(file_handler)
-
-        self.training_file_logger = self.step_logger
-
-
-    def _aggregate_metric_dicts(self, metrics_list):
-        if not metrics_list:
-            return {}
-
-        aggregated = {}
-        counts = {}
-        for metrics in metrics_list:
-            for key, value in metrics.items():
-                aggregated[key] = aggregated.get(key, 0.0) + float(value)
-                counts[key] = counts.get(key, 0) + 1
-        return {key: aggregated[key] / counts[key] for key in aggregated}
-
-    def _format_metric_value(self, value):
-        if isinstance(value, torch.Tensor):
-            value = value.detach().cpu()
-            if value.numel() == 1:
-                return f"{value.item():.6f}"
-            return "[" + ", ".join(f"{v:.6f}" for v in value.flatten().tolist()) + "]"
-        if isinstance(value, np.ndarray):
-            if value.size == 1:
-                return f"{float(value):.6f}"
-            return "[" + ", ".join(f"{v:.6f}" for v in value.flatten().tolist()) + "]"
-        if isinstance(value, (list, tuple)):
-            if len(value) == 1 and isinstance(value[0], numbers.Number):
-                return f"{value[0]:.6f}"
-            return "[" + ", ".join(str(v) for v in value) + "]"
-        if isinstance(value, numbers.Number):
-            return f"{value:.6f}"
-        return str(value)
-
-    def _log_metrics_to_file(self, step, phase, metrics):
-        if not self.accelerator.is_main_process or not metrics:
-            return
-
-        formatted_pairs = []
-        for key, value in metrics.items():
-            try:
-                formatted_value = self._format_metric_value(value)
-            except Exception:
-                formatted_value = str(value)
-            formatted_pairs.append(f"{key}={formatted_value}")
-
-        metrics_str = "  ".join(formatted_pairs)
-        self.training_file_logger.info(
-            "Epoch %s Step %s [%s] %s", self.epoch, step, phase, metrics_str
-        )
 
     def logs_update(self, logs):
         for key, value in logs.items():
@@ -1123,78 +961,10 @@ class Trainer:
             to_log = sum / count
             epoch_log[key] = to_log
         epoch_log["epoch"] = step
-        metrics_msg = ", ".join(
-            f"{k}={v:.4f}" if isinstance(v, (float, int)) else f"{k}={v}"
-            for k, v in epoch_log.items()
-            if k != "epoch"
-        )
-        self._log_step_message(
-            f"[step {step}] Aggregated metrics (epoch {self.epoch}): {metrics_msg}"
-        )
-
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
         self.epoch_log = OrderedDict()
 
-    def _log_step_message(self, message: str):
-        if self.accelerator.is_main_process:
-            if hasattr(self, "step_logger"):
-                self.step_logger.info(message)
-            else:
-                print(message, flush=True)
-
-    def update_latent_metrics(self, encode_output, act, z_out):
-        if self.latent_metric_analyzer is None:
-            return
-
-        with torch.no_grad():
-            latent_actions = encode_output["latent_actions"].detach()
-            quantized_actions = encode_output["quantized_latent_actions"].detach()
-            vq_indices = encode_output["vq_outputs"]["indices"].detach()
-            state_repr = encode_output["visual_embs"].detach().mean(dim=2)
-            actions = act.detach()
-
-            per_step_errors = None
-            per_step_actions = None
-            if self.cfg.has_predictor and z_out is not None:
-                z_obs_out, _ = self.model.separate_emb(z_out.detach())
-                z_pred_visual = z_obs_out["visual"]
-                z_tgt_full = encode_output["z"].detach()[:, self.model.num_pred :, :, :]
-                z_tgt_obs, _ = self.model.separate_emb(z_tgt_full)
-                z_tgt_visual = z_tgt_obs["visual"]
-                per_step_errors = ((z_pred_visual - z_tgt_visual) ** 2).mean(dim=(2, 3))
-                per_step_actions = act[:, self.model.num_pred :, :].detach()
-
-            gathered = {
-                "latent_actions": self.accelerator.gather_for_metrics(latent_actions),
-                "quantized_actions": self.accelerator.gather_for_metrics(quantized_actions),
-                "actions": self.accelerator.gather_for_metrics(actions),
-                "state_repr": self.accelerator.gather_for_metrics(state_repr),
-                "vq_indices": self.accelerator.gather_for_metrics(vq_indices),
-                "per_step_errors": self.accelerator.gather_for_metrics(per_step_errors)
-                if per_step_errors is not None
-                else None,
-                "per_step_actions": self.accelerator.gather_for_metrics(per_step_actions)
-                if per_step_actions is not None
-                else None,
-            }
-
-        if not self.accelerator.is_main_process:
-            return
-
-        self.latent_metric_analyzer.update(
-            latent_actions=gathered["latent_actions"].cpu(),
-            quantized_actions=gathered["quantized_actions"].cpu(),
-            actions=gathered["actions"].cpu(),
-            state_repr=gathered["state_repr"].cpu(),
-            code_indices=gathered["vq_indices"].cpu(),
-            per_step_errors=gathered["per_step_errors"].cpu()
-            if gathered["per_step_errors"] is not None
-            else None,
-            per_step_error_actions=gathered["per_step_actions"].cpu()
-            if gathered["per_step_actions"] is not None
-            else None,
-        )
 
     def plot_samples(
         self,
