@@ -28,7 +28,7 @@ class LatentActionModel(nn.Module):
         enc_blocks: int,
         dec_blocks: int,      # unused now (no decoder), kept for interface
         num_heads: int,
-        dropout: float = 0.0,
+        dropout: float,
     ) -> None:
         super(LatentActionModel, self).__init__()
 

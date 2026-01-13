@@ -691,8 +691,8 @@ class Trainer:
             )
         ):
             self.global_step += 1
-            obs, act,_ = data
-            plot = i == 0  # only plot from the first batch
+            obs, act,_,_ = data
+            plot = False  # dont plot at all
             self.model.train()
             (
                 z_out,
@@ -703,36 +703,36 @@ class Trainer:
                 encode_output,
             ) = self.model(obs, act)
 
-            self.encoder_optimizer.zero_grad()
-            if self.cfg.has_decoder:
-                self.decoder_optimizer.zero_grad()
-            if self.cfg.has_predictor:
-                self.predictor_optimizer.zero_grad()
-                self.action_encoder_optimizer.zero_grad()
-            self.latent_optimizer.zero_grad()
+            if self.encoder_optimizer: self.encoder_optimizer.zero_grad()
+            if self.decoder_optimizer: self.decoder_optimizer.zero_grad()
+            if self.predictor_optimizer: self.predictor_optimizer.zero_grad()
+            if self.action_encoder_optimizer: self.action_encoder_optimizer.zero_grad()
+            if self.latent_optimizer: self.latent_optimizer.zero_grad()
+            
+            self.accelerator.backward(loss)
 
-            vq_loss = loss_components.get("vq_loss")
-            retain_graph = vq_loss is not None
-            prediction_loss = loss
-
-            self.accelerator.backward(prediction_loss, retain_graph=retain_graph)
-            if vq_loss is not None:
-                self.accelerator.backward(vq_loss)
-
-            if self.model.train_encoder:
+            if self.encoder_optimizer and self.model.train_encoder:
                 self.encoder_optimizer.step()
-            if self.cfg.has_decoder and self.model.train_decoder:
+
+            if self.decoder_optimizer and self.cfg.has_decoder and self.model.train_decoder:
                 self.decoder_optimizer.step()
-            if self.cfg.has_predictor and self.model.train_predictor:
+
+            if self.predictor_optimizer and self.cfg.has_predictor and self.model.train_predictor:
                 self.predictor_optimizer.step()
+
+            if self.action_encoder_optimizer:
                 self.action_encoder_optimizer.step()
-            self.latent_optimizer.step()
+
+            if self.latent_optimizer:
+                self.latent_optimizer.step()
+
 
             loss = self.accelerator.gather_for_metrics(loss).mean()
             loss_components = self.accelerator.gather_for_metrics(loss_components)
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
+            
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
                 if self.cfg.has_predictor:
@@ -808,10 +808,9 @@ class Trainer:
                 desc=f"Epoch {self.epoch} Valid",
                 disable=not self.accelerator.is_main_process,
                 position=1,
-                leave=False,
             )
         ):
-            obs, act, _ = data
+            obs, act, _,_ = data
             plot = i == 0
             self.model.eval()
             z_out, visual_out, visual_reconstructed, loss, loss_components, encode_output = self.model(

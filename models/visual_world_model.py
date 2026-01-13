@@ -276,6 +276,7 @@ class VWorldModel(nn.Module):
         vq_output = encode_output["vq_outputs"]
         if vq_output is not None and ("loss" in vq_output) and (vq_output["loss"] is not None):
             loss_components["idm_vq_loss"] = vq_output["loss"]
+            loss = loss + loss_components["idm_vq_loss"]
 
         z_src = z[:, : self.num_hist, :, :]  # (b, num_hist, num_patches, dim)
         z_tgt = z[:, self.num_pred :, :, :]  # (b, num_hist, num_patches, dim)
