@@ -2,7 +2,6 @@ import os
 import time
 import math
 import hydra
-import numbers
 import torch
 import torch.nn as nn
 import wandb
@@ -29,6 +28,43 @@ from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
+
+class JsonlLogger:
+    """
+    Minimal JSONL logger (one JSON object per line), safe for:
+      - DDP/Accelerate (writes only on main process if provided)
+      - multi-threaded usage (internal lock)
+
+    Usage:
+      logger = JsonlLogger("metrics.jsonl", is_main_process=accelerator.is_main_process)
+      logger.log({"step": 10, "loss": 0.123})
+    """
+    def __init__(self, path: str, is_main_process: bool = True):
+        self.is_main_process = bool(is_main_process)
+        self.path = Path(path)
+        self._lock = threading.Lock()
+
+        if self.is_main_process:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            # line-buffered append
+            self._fh = open(self.path, "a", buffering=1, encoding="utf-8")
+        else:
+            self._fh = None
+
+    def log(self, obj: dict):
+        """Append obj as a single JSON line. No-op on non-main processes."""
+        if not self.is_main_process or self._fh is None:
+            return
+
+        with self._lock:
+            self._fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            self._fh.flush()  # keep it minimal but robust
+
+    def close(self):
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+
 
 class Trainer:
     def __init__(self, cfg):
@@ -68,6 +104,8 @@ class Trainer:
         self.device = self.accelerator.device
         log.info(f"device: {self.device}   model_name: {model_name}")
         self.base_path = os.path.dirname(os.path.abspath(__file__))
+        log_path = Path(self.cfg.saved_folder) / "diagnosis" / "metrics.jsonl"
+        self.jsonl = JsonlLogger(str(log_path), is_main_process=self.accelerator.is_main_process)
 
         self.num_reconstruct_samples = self.cfg.training.num_reconstruct_samples
         self.total_epochs = self.cfg.training.epochs

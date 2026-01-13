@@ -36,8 +36,6 @@ training:
   epochs: 3
   batch_size: 32 # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
-  val_every_x_steps: 8000 # set >0 to run validation every N training steps
-  log_every_x_steps: 50 # write training stats to training.log every N training steps
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
   encoder_lr: 1e-6
@@ -104,11 +102,13 @@ plan_settings:
   alpha: [0.1, 1]
 
 metrics:
-  enabled: False
-  max_samples: 4096
-  mi_k: 5
-  knn_k: 10
-  action_round_decimals: 3
-  umap_points: 2000
-  umap_neighbors: 15
-  umap_min_dist: 0.1
+  swap_check_every_n_steps: 100
+  ppl_check_every_n_steps: 200
+  deadcode_check_every_n_steps: 1000
+  ppl_batch_window: 200
+  deadcode_batch_window: 1000
+  swap_bad_streak_to_flag: 5
+  shuffle_u_threshold: 0.05
+  shuffle_z_threshold: 0.65
+  ppl_norm_threshold: 0.1
+  deadcode_threshold: 0.5
