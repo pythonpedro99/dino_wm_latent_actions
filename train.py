@@ -737,7 +737,7 @@ class Trainer:
                 self.model.eval()
                 with torch.no_grad():
 
-                    z = encode_output["z"].detach()                      # [B,T,P',D']
+                    z = encode_output["z"].detach()             # [B,T,P',D']
                     z_src = z[:, : self.model.num_hist]         # [B,H,P',D']
                     z_tgt = z[:, self.model.num_pred :]         # [B,H,P',D']
 
