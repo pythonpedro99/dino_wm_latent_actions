@@ -54,13 +54,9 @@ normalize_action: True
 action_emb_dim: 10 
 num_action_repeat: 1
 
-# proprio encoder
-proprio_emb_dim: 2
-num_proprio_repeat: 1
-
 num_hist: 1
 num_pred: 1 # only supports 1
-has_predictor: True # set this to False for only training a decoder
+has_predictor: True 
 has_decoder: False # set this to False for only training a predictor
 
 model:

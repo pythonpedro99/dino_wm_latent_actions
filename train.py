@@ -215,22 +215,23 @@ class Trainer:
 
         self.use_action_encoder = self.cfg.model.use_action_encoder
         self.use_lam = self.cfg.model.use_lam
-        self.swap_check_every_n_steps = int(self.cfg.metric.swap_check_every_n_steps)
-        self.ppl_check_every_n_steps = int(self.cfg.metric.ppl_check_every_n_steps)
-        self.deadcode_check_every_n_steps = int(self.cfg.metric.deadcode_check_every_n_steps)
+        self.swap_check_every_n_steps = int(self.s.swap_check_every_n_steps)
+        self.ppl_check_every_n_steps = int(self.cfg.metrics.ppl_check_every_n_steps)
+        self.deadcode_check_every_n_steps = int(self.cfg.metrics.deadcode_check_every_n_steps)
 
-        self.ppl_batch_window = int(self.cfg.metric.ppl_batch_window)
-        self.deadcode_batch_window = int(self.cfg.metric.deadcode_batch_window)
-        self.swap_bad_streak_to_flag = int(self.cfg.metric.swap_bad_streak_to_flag)
+        self.ppl_batch_window = int(self.cfg.metrics.ppl_batch_window)
+        self.deadcode_batch_window = int(self.cfg.metrics.deadcode_batch_window)
+        self.swap_bad_streak_to_flag = int(self.cfg.metrics.swap_bad_streak_to_flag)
 
-        self.shuffle_u_threshold = float(self.cfg.metric.shuffle_u_threshold)
-        self.shuffle_z_threshold = float(self.cfg.metric.shuffle_z_threshold)
-        self.ppl_norm_threshold = float(self.cfg.metric.ppl_norm_threshold)
-        self.deadcode_threshold = float(self.cfg.metric.deadcode_threshold)
+        self.shuffle_u_threshold = float(self.cfg.metrics.shuffle_u_threshold)
+        self.shuffle_z_threshold = float(self.cfg.metrics.shuffle_z_threshold)
+        self.ppl_norm_threshold = float(self.cfg.metrics.ppl_norm_threshold)
+        self.deadcode_threshold = float(self.cfg.metrics.deadcode_threshold)
 
         self._swap_bad_streak = 0
         self._ppl_idx_window = deque(maxlen=self.ppl_batch_window)
         self._dead_idx_window = deque(maxlen=self.deadcode_batch_window)
+        self.codebook_size = self.cfg.model.codebook_dim * self.cfg.model.codebook_splits
 
 
         if self.use_action_encoder == self.use_lam:
