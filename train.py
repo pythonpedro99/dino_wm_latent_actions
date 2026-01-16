@@ -9,6 +9,7 @@ import logging
 import warnings
 import threading
 import itertools
+import json
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -25,6 +26,8 @@ from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 from metrics.image_metrics import eval_images
 from utils import slice_trajdict_with_t, cfg_to_dict, seed, sample_tensors
+from collections import deque
+import torch.nn.functional as F
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
@@ -212,6 +215,23 @@ class Trainer:
 
         self.use_action_encoder = self.cfg.model.use_action_encoder
         self.use_lam = self.cfg.model.use_lam
+        self.swap_check_every_n_steps = int(self.cfg.metric.swap_check_every_n_steps)
+        self.ppl_check_every_n_steps = int(self.cfg.metric.ppl_check_every_n_steps)
+        self.deadcode_check_every_n_steps = int(self.cfg.metric.deadcode_check_every_n_steps)
+
+        self.ppl_batch_window = int(self.cfg.metric.ppl_batch_window)
+        self.deadcode_batch_window = int(self.cfg.metric.deadcode_batch_window)
+        self.swap_bad_streak_to_flag = int(self.cfg.metric.swap_bad_streak_to_flag)
+
+        self.shuffle_u_threshold = float(self.cfg.metric.shuffle_u_threshold)
+        self.shuffle_z_threshold = float(self.cfg.metric.shuffle_z_threshold)
+        self.ppl_norm_threshold = float(self.cfg.metric.ppl_norm_threshold)
+        self.deadcode_threshold = float(self.cfg.metric.deadcode_threshold)
+
+        self._swap_bad_streak = 0
+        self._ppl_idx_window = deque(maxlen=self.ppl_batch_window)
+        self._dead_idx_window = deque(maxlen=self.deadcode_batch_window)
+
 
         if self.use_action_encoder == self.use_lam:
             raise ValueError("Invalid config: choose exactly one: model.use_action_encoder XOR model.use_lam")
@@ -749,32 +769,72 @@ class Trainer:
                     else:
                         _, act_base_h = self.model.separate_emb(z_src)
 
-                    # swap + shuffle checks
+                    # ----------------------------
+                    # swap + shuffle checks (streak-based)
+                    # ----------------------------
                     if self.global_step % self.swap_check_every_n_steps == 0:
-                        swap_s = self.metric_z_swap_score(z_src, z_tgt, act_base_h)
+                        swap_s = float(self.metric_z_swap_score(z_src, z_tgt, act_base_h))
                         delta, mse_base, mse_shuf = self.metric_action_shuffle_delta(z_src, z_tgt, act_base_h)
+                        delta = float(delta); mse_base = float(mse_base); mse_shuf = float(mse_shuf)
+
+                        swap_bad = self._swap_is_bad(swap_s, delta)
+                        self._swap_bad_streak = (self._swap_bad_streak + 1) if swap_bad else 0
+                        swap_flagged = (self._swap_bad_streak >= self.swap_bad_streak_to_flag)
+
                         self.jsonl.log({
                             "step": int(self.global_step),
-                            "swap_s": float(swap_s),
-                            "shuffle_delta": float(delta),
-                            "mse_base": float(mse_base),
-                            "mse_shuf": float(mse_shuf),
+                            "swap_s": swap_s,
+                            "shuffle_delta": delta,
+                            "mse_base": mse_base,
+                            "mse_shuf": mse_shuf,
+                            "swap_bad": bool(swap_bad),
+                            "swap_bad_streak": int(self._swap_bad_streak),
+                            "swap_flagged": bool(swap_flagged),
                         })
 
-
-                    # VQ usage checks
+                    # ----------------------------
+                    # VQ usage checks (windowed)
+                    # ----------------------------
                     if self.model.use_vq and (encode_output.get("vq_outputs") is not None):
-                        vq_idx = encode_output["vq_outputs"].get("indices", None)  # [B,T]
-                        if vq_idx is not None and (self.global_step % self.ppl_check_every_n_steps == 0):
-                            ppl, ppl_norm = self.metric_codebook_ppl(vq_idx)
-                            self.jsonl.log({"step": int(self.global_step), "ppl": float(ppl), "ppl_norm": float(ppl_norm)})
+                        vq_idx = encode_output["vq_outputs"].get("indices", None)  # [B,T] typically
 
+                        # always append indices when available
+                        if vq_idx is not None:
+                            self._append_vq_idx(vq_idx)
+
+                        # ppl computed over last ppl_batch_window appended batches
+                        if vq_idx is not None and (self.global_step % self.ppl_check_every_n_steps == 0):
+                            idx_win = self._cat_window(self._ppl_idx_window)
+                            if idx_win is not None:
+                                ppl, ppl_norm = self.metric_codebook_ppl(idx_win)
+                                ppl = float(ppl); ppl_norm = float(ppl_norm)
+                                ppl_bad = (ppl_norm < self.ppl_norm_threshold)
+
+                                self.jsonl.log({
+                                    "step": int(self.global_step),
+                                    "ppl": ppl,
+                                    "ppl_norm": ppl_norm,
+                                    "ppl_bad": bool(ppl_bad),
+                                    "ppl_window_steps": int(len(self._ppl_idx_window)),
+                                })
+
+                        # deadcode computed over last deadcode_batch_window appended batches
                         if vq_idx is not None and (self.global_step % self.deadcode_check_every_n_steps == 0):
-                            dead_rate = self.metric_deadcode_rate(vq_idx)
-                            self.jsonl.log({"step": int(self.global_step), "dead_rate": float(dead_rate)})
+                            idx_win = self._cat_window(self._dead_idx_window)
+                            if idx_win is not None:
+                                dead_rate = float(self.metric_deadcode_rate(idx_win))
+                                dead_bad = (dead_rate > self.deadcode_threshold)
+
+                                self.jsonl.log({
+                                    "step": int(self.global_step),
+                                    "dead_rate": dead_rate,
+                                    "dead_bad": bool(dead_bad),
+                                    "deadcode_window_steps": int(len(self._dead_idx_window)),
+                                })
 
                 if was_training:
                     self.model.train()
+
             
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
@@ -1008,6 +1068,22 @@ class Trainer:
             key: sum(values) / len(values) for key, values in logs.items() if values
         }
         return logs
+    
+    def _append_vq_idx(self, vq_idx: torch.Tensor):
+        # store flattened indices on CPU to avoid GPU memory growth
+        idx = vq_idx.detach().reshape(-1).to("cpu", non_blocking=True)
+        self._ppl_idx_window.append(idx)
+        self._dead_idx_window.append(idx)
+
+    def _cat_window(self, window):
+        if len(window) == 0:
+            return None
+        return torch.cat(list(window), dim=0)
+
+    def _swap_is_bad(self, swap_s: float, shuffle_delta: float) -> bool:
+        # shuffle_u_threshold: 0.05 (<) => bad if delta < 0.05
+        # shuffle_z_threshold: 0.65 (>) => bad if swap_s > 0.65
+        return (shuffle_delta < self.shuffle_u_threshold) or (swap_s > self.shuffle_z_threshold)
     
     @torch.no_grad()
     def metric_z_swap_score(self, z_src, z_tgt, act_base_h) -> float:
