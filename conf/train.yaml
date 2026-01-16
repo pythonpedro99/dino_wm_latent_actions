@@ -85,7 +85,7 @@ model:
 
   # latent-action (VQ) config
   codebook_splits: 1
-  codebook_dim: 10              # latent_action_dim = codebook_splits * codebook_dim (if you use that convention)
+  codebook_dim: 10              # latent_action_dim must be = codebook_splits * codebook_dim 
   latent_action_dim: 10
   commitment: 0.1
   ema_decay: 0.95

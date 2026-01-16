@@ -8,10 +8,3 @@ from sklearn import metrics
 import torch
 from sklearn.preprocessing import StandardScaler
 
-
-class LatentMetricsAggregator:
-    def __init__(
-        self,
-        
-    ):
-       pass

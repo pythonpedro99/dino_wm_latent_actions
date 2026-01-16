@@ -43,6 +43,7 @@ class VWorldModel(nn.Module):
         self.latent_action_model = latent_action_model
         self.vq_model = vq_model
         self.latent_action_down = latent_action_down
+        self.concat_dim = concat_dim 
 
         self.train_lam = train_lam
         self.train_encoder = train_encoder
@@ -97,7 +98,7 @@ class VWorldModel(nn.Module):
         print(f"encoder_emb_dim: {self.encoder_emb_dim}")
 
 
-        self.concat_dim = concat_dim  # 0 or 1
+        
         assert concat_dim == 0 or concat_dim == 1, f"concat_dim {concat_dim} not supported."
         print("Model emb_dim: ", self.emb_dim)
 

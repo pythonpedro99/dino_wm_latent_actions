@@ -111,7 +111,6 @@ class Trainer:
         self.total_epochs = self.cfg.training.epochs
         self.epoch = 0
         self.global_step = 0
-        self.val_every_x_steps = self.cfg.training.val_every_x_steps
         
         assert cfg.training.batch_size % self.accelerator.num_processes == 0, (
             "Batch size must be divisible by the number of processes. "
@@ -308,7 +307,7 @@ class Trainer:
             if self.action_encoder is None:
                 self.action_encoder = hydra.utils.instantiate(
                     self.cfg.action_encoder,
-                    in_chans=self.datasets["train"].action_dim,
+                    in_chans=self.datasets["train"].action_dim * self.cfg.frameskip,
                     emb_dim=self.cfg.action_emb_dim,
                 )
 
@@ -472,7 +471,7 @@ class Trainer:
             predictor=self.predictor,
             codebook_splits=self.cfg.model.codebook_splits,
             codebook_dim=self.cfg.model.codebook_dim,
-            action_dim=(action_emb_dim if self.action_encoder is not None else 0),
+            action_dim=self.datasets["train"].action_dim,
             concat_dim=self.cfg.concat_dim,
             latent_action_dim=self.cfg.model.latent_action_dim,
             num_action_repeat=self.cfg.num_action_repeat,
@@ -480,7 +479,11 @@ class Trainer:
             train_predictor=self.train_predictor,
             train_decoder=self.train_decoder,
             train_lam=self.train_lam,
+            use_action_encoder=self.cfg.model.use_action_encoder,
+            use_lam=self.cfg.model.use_lam,
+            use_vq=self.cfg.model.use_vq,
         )
+
 
         if self.action_encoder is not None:
             model_kwargs["action_encoder"] = self.action_encoder
@@ -493,8 +496,7 @@ class Trainer:
             model_kwargs["latent_action_down"] = self.latent_action_down
 
         self.model = hydra.utils.instantiate(self.cfg.model, **model_kwargs)
-
-
+        self.model = self.accelerator.prepare(self.model)
 
     def init_optimizers(self):
         # -------------------------
@@ -732,6 +734,51 @@ class Trainer:
             loss_components = {
                 key: value.mean().item() for key, value in loss_components.items()
             }
+
+            # ---- collapse metrics ----
+            if self.use_lam:
+                was_training = self.model.training
+                self.model.eval()
+                with torch.no_grad():
+
+                    z = encode_output["z"].detach()                      # [B,T,P',D']
+                    z_src = z[:, : self.model.num_hist]         # [B,H,P',D']
+                    z_tgt = z[:, self.model.num_pred :]         # [B,H,P',D']
+
+                    # base action vectors aligned with history axis H
+                    if self.model.use_vq and (encode_output.get("quantized_latent_actions") is not None):
+                        act_base_h = encode_output["quantized_latent_actions"][:, : self.model.num_hist]
+                    elif (encode_output.get("latent_actions") is not None):
+                        act_base_h = encode_output["latent_actions"][:, : self.model.num_hist]
+                    else:
+                        _, act_base_h = self.model.separate_emb(z_src)
+
+                    # swap + shuffle checks
+                    if self.global_step % self.swap_check_every_n_steps == 0:
+                        swap_s = self.metric_z_swap_score(z_src, z_tgt, act_base_h)
+                        delta, mse_base, mse_shuf = self.metric_action_shuffle_delta(z_src, z_tgt, act_base_h)
+                        self.jsonl.log({
+                            "step": int(self.global_step),
+                            "swap_s": float(swap_s),
+                            "shuffle_delta": float(delta),
+                            "mse_base": float(mse_base),
+                            "mse_shuf": float(mse_shuf),
+                        })
+
+
+                    # VQ usage checks
+                    if self.model.use_vq and (encode_output.get("vq_outputs") is not None):
+                        vq_idx = encode_output["vq_outputs"].get("indices", None)  # [B,T]
+                        if vq_idx is not None and (self.global_step % self.ppl_check_every_n_steps == 0):
+                            ppl, ppl_norm = self.metric_codebook_ppl(vq_idx)
+                            self.jsonl.log({"step": int(self.global_step), "ppl": float(ppl), "ppl_norm": float(ppl_norm)})
+
+                        if vq_idx is not None and (self.global_step % self.deadcode_check_every_n_steps == 0):
+                            dead_rate = self.metric_deadcode_rate(vq_idx)
+                            self.jsonl.log({"step": int(self.global_step), "dead_rate": float(dead_rate)})
+
+                if was_training:
+                    self.model.train()
             
             if self.cfg.has_decoder and plot:
                 # only eval images when plotting due to speed
@@ -788,12 +835,12 @@ class Trainer:
                     phase="train",
                 )
 
-            loss_components = {f"train_{k}": [v] for k, v in loss_components.items()} #TODO
+            loss_components = {f"train_{k}": [v] for k, v in loss_components.items()}
             self.logs_update(loss_components)
 
     def val(self):
         self.model.eval()
-        if len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
+        if self.accelerator.is_main_process and len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
             with torch.no_grad():
                 val_rollout_logs = self.openloop_rollout(self.val_traj_dset, mode="val")
                 val_rollout_logs = {
@@ -802,85 +849,85 @@ class Trainer:
                 self.logs_update(val_rollout_logs)
 
         self.accelerator.wait_for_everyone()
-        for i, data in enumerate(
-            tqdm(
-                self.dataloaders["valid"],
-                desc=f"Epoch {self.epoch} Valid",
-                disable=not self.accelerator.is_main_process,
-                position=1,
-            )
-        ):
-            obs, act, _,_ = data
-            plot = i == 0
-            self.model.eval()
-            z_out, visual_out, visual_reconstructed, loss, loss_components, encode_output = self.model(
-                obs, act
-            )
-
-            loss = self.accelerator.gather_for_metrics(loss).mean()
-
-            loss_components = self.accelerator.gather_for_metrics(loss_components)
-            loss_components = {
-                key: value.mean().item() for key, value in loss_components.items()
-            }
-
-            if self.cfg.has_decoder and plot:
-                # only eval images when plotting due to speed
-                if self.cfg.has_predictor:
-                    z_obs_out, z_act_out = self.model.separate_emb(z_out)
-                    z_gt = self.model.encode_obs(obs)
-                    z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
-                    err_logs = self.err_eval(z_obs_out, z_tgt)
-
-                    err_logs = self.accelerator.gather_for_metrics(err_logs)
-                    err_logs = {
-                        key: value.mean().item() for key, value in err_logs.items()
-                    }
-                    err_logs = {f"val_{k}": [v] for k, v in err_logs.items()}
-
-                    self.logs_update(err_logs)
-
-                if visual_out is not None:
-                    for t in range(
-                        self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
-                    ):
-                        img_pred_scores = eval_images(
-                            visual_out[:, t - self.cfg.num_pred], obs["visual"][:, t]
-                        )
-                        img_pred_scores = self.accelerator.gather_for_metrics(
-                            img_pred_scores
-                        )
-                        img_pred_scores = {
-                            f"val_img_{k}_pred": [v.mean().item()]
-                            for k, v in img_pred_scores.items()
-                        }
-                        self.logs_update(img_pred_scores)
-
-                if visual_reconstructed is not None:
-                    for t in range(obs["visual"].shape[1]):
-                        img_reconstruction_scores = eval_images(
-                            visual_reconstructed[:, t], obs["visual"][:, t]
-                        )
-                        img_reconstruction_scores = self.accelerator.gather_for_metrics(
-                            img_reconstruction_scores
-                        )
-                        img_reconstruction_scores = {
-                            f"val_img_{k}_reconstructed": [v.mean().item()]
-                            for k, v in img_reconstruction_scores.items()
-                        }
-                        self.logs_update(img_reconstruction_scores)
-
-                self.plot_samples(
-                    obs["visual"],
-                    visual_out,
-                    visual_reconstructed,
-                    self.epoch,
-                    batch=i,
-                    num_samples=self.num_reconstruct_samples,
-                    phase="valid",
+        with torch.no_grad():
+            for i, data in enumerate(
+                tqdm(
+                    self.dataloaders["valid"],
+                    desc=f"Epoch {self.epoch} Valid",
+                    disable=not self.accelerator.is_main_process,
+                    position=1,
                 )
-            loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
-            self.logs_update(loss_components)
+            ):
+                obs, act, _,_ = data
+                plot = i == 0
+                z_out, visual_out, visual_reconstructed, loss, loss_components, encode_output = self.model(
+                    obs, act
+                )
+
+                loss = self.accelerator.gather_for_metrics(loss).mean()
+
+                loss_components = self.accelerator.gather_for_metrics(loss_components)
+                loss_components = {
+                    key: value.mean().item() for key, value in loss_components.items()
+                }
+
+                if self.cfg.has_decoder and plot:
+                    # only eval images when plotting due to speed
+                    if self.cfg.has_predictor:
+                        z_obs_out, z_act_out = self.model.separate_emb(z_out)
+                        z_gt = self.model.encode_obs(obs)
+                        z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
+                        err_logs = self.err_eval(z_obs_out, z_tgt)
+
+                        err_logs = self.accelerator.gather_for_metrics(err_logs)
+                        err_logs = {
+                            key: value.mean().item() for key, value in err_logs.items()
+                        }
+                        err_logs = {f"val_{k}": [v] for k, v in err_logs.items()}
+
+                        self.logs_update(err_logs)
+
+                    if visual_out is not None:
+                        for t in range(
+                            self.cfg.num_hist, self.cfg.num_hist + self.cfg.num_pred
+                        ):
+                            img_pred_scores = eval_images(
+                                visual_out[:, t - self.cfg.num_pred], obs["visual"][:, t]
+                            )
+                            img_pred_scores = self.accelerator.gather_for_metrics(
+                                img_pred_scores
+                            )
+                            img_pred_scores = {
+                                f"val_img_{k}_pred": [v.mean().item()]
+                                for k, v in img_pred_scores.items()
+                            }
+                            self.logs_update(img_pred_scores)
+
+                    if visual_reconstructed is not None:
+                        for t in range(obs["visual"].shape[1]):
+                            img_reconstruction_scores = eval_images(
+                                visual_reconstructed[:, t], obs["visual"][:, t]
+                            )
+                            img_reconstruction_scores = self.accelerator.gather_for_metrics(
+                                img_reconstruction_scores
+                            )
+                            img_reconstruction_scores = {
+                                f"val_img_{k}_reconstructed": [v.mean().item()]
+                                for k, v in img_reconstruction_scores.items()
+                            }
+                            self.logs_update(img_reconstruction_scores)
+
+                    self.plot_samples(
+                        obs["visual"],
+                        visual_out,
+                        visual_reconstructed,
+                        self.epoch,
+                        batch=i,
+                        num_samples=self.num_reconstruct_samples,
+                        phase="valid",
+                    )
+                loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
+                self.logs_update(loss_components)
 
 
     def openloop_rollout(
@@ -932,7 +979,7 @@ class Trainer:
             for k in obs.keys():
                 obs_g[k] = obs[k][-1].unsqueeze(0).unsqueeze(0).to(self.device)
             z_g = self.model.encode_obs(obs_g)
-            actions = act.unsqueeze(0)
+            actions = act.unsqueeze(0) if self.model.use_action_encoder else None
 
             for past in num_past:
                 n_past, postfix = past
@@ -965,6 +1012,102 @@ class Trainer:
             key: sum(values) / len(values) for key, values in logs.items() if values
         }
         return logs
+    
+    @torch.no_grad()
+    def metric_z_swap_score(self, z_src, z_tgt, act_base_h) -> float:
+        """
+        Information-bypass (z-swap) score in visual-token space.
+
+        Requires self.model:
+          - separate_emb(z) -> ({"visual": z_visual}, z_act_base)
+          - replace_actions_from_z(z, act_base)
+          - predict(z_src) -> z_pred
+        """
+        tgt_obs, _ = self.model.separate_emb(z_tgt.detach())
+        tgt_vis = tgt_obs["visual"]  # [B,H,P,D_vis]
+
+        B, H = act_base_h.shape[:2]
+        N = B * H
+        perm = torch.randperm(N, device=z_src.device)
+
+        act_flat = act_base_h.reshape(N, -1)
+        act_swapped = act_flat[perm].reshape_as(act_base_h)
+
+        z_src_cf = self.model.replace_actions_from_z(z_src.clone(), act_swapped)
+        z_hat = self.model.predict(z_src_cf)
+
+        hat_obs, _ = self.model.separate_emb(z_hat)
+        hat_vis = hat_obs["visual"]  # [B,H,P,D_vis]
+
+        hat_f = hat_vis.reshape(N, -1)
+        tgt_f = tgt_vis.reshape(N, -1)
+
+        d_to_j = torch.norm(hat_f - tgt_f[perm], dim=1)
+        d_to_i = torch.norm(hat_f - tgt_f, dim=1)
+        return float((d_to_j < d_to_i).float().mean().item())
+
+    @torch.no_grad()
+    def metric_action_shuffle_delta(self, z_src, z_tgt, act_base_h, eps: float = 1e-8):
+        """
+        Action-ignoring (action-shuffle) delta in visual-token space:
+          delta = (MSE_shuf - MSE_base)/(MSE_base+eps)
+
+        Returns: (delta, mse_base, mse_shuf)
+        """
+        tgt_obs, _ = self.model.separate_emb(z_tgt.detach())
+        tgt_vis = tgt_obs["visual"]
+
+        z_pred = self.model.predict(z_src)
+        pred_obs, _ = self.model.separate_emb(z_pred)
+        pred_vis = pred_obs["visual"]
+        mse_base = float(F.mse_loss(pred_vis, tgt_vis, reduction="mean").item())
+
+        B, H = act_base_h.shape[:2]
+        N = B * H
+        perm = torch.randperm(N, device=z_src.device)
+
+        act_flat = act_base_h.reshape(N, -1)
+        act_shuf = act_flat[perm].reshape_as(act_base_h)
+
+        z_src_shuf = self.model.replace_actions_from_z(z_src.clone(), act_shuf)
+        z_pred_shuf = self.model.predict(z_src_shuf)
+
+        pred_obs_shuf, _ = self.model.separate_emb(z_pred_shuf)
+        pred_vis_shuf = pred_obs_shuf["visual"]
+        mse_shuf = float(F.mse_loss(pred_vis_shuf, tgt_vis, reduction="mean").item())
+
+        delta = float((mse_shuf - mse_base) / (mse_base + eps))
+        return delta, mse_base, mse_shuf
+
+    def metric_codebook_ppl(self, vq_indices: torch.Tensor, eps: float = 1e-8):
+        """
+        Constant-code collapse metric:
+          PPL = exp( -sum_k p(k) log(p(k)+eps) )
+          PPL_norm = PPL / K
+
+        Uses self.codebook_size as K.
+        """
+        K = int(self.codebook_size)
+        idx = vq_indices.reshape(-1).to(torch.long)
+        counts = torch.bincount(idx, minlength=K).float()
+        p = counts / (counts.sum() + eps)
+        entropy = -(p * (p + eps).log()).sum().item()
+        ppl = math.exp(entropy)
+        ppl_norm = ppl / float(K)
+        return float(ppl), float(ppl_norm)
+
+    def metric_deadcode_rate(self, vq_indices: torch.Tensor):
+        """
+        Dead-code rate:
+          dead_rate = 1 - (#codes used)/K
+
+        Uses self.codebook_size as K.
+        """
+        K = int(self.codebook_size)
+        idx = vq_indices.reshape(-1).to(torch.long)
+        counts = torch.bincount(idx, minlength=K)
+        used = int((counts > 0).sum().item())
+        return float(1.0 - used / float(K))
 
 
     def log_train_errors(self, z_out, obs):
