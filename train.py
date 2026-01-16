@@ -520,59 +520,48 @@ class Trainer:
         self.model = self.accelerator.prepare(self.model)
 
     def init_optimizers(self):
-        # -------------------------
         # Encoder optimizer
-        # -------------------------
-        self.encoder_optimizer = None
         if self.train_encoder:
-            self.encoder_optimizer = torch.optim.Adam(
-                self.encoder.parameters(),
-                lr=self.cfg.training.encoder_lr,
-            )
-            self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
+            if getattr(self, "encoder_optimizer", None) is None:
+                self.encoder_optimizer = torch.optim.Adam(
+                    self.encoder.parameters(),
+                    lr=self.cfg.training.encoder_lr,
+                )
+                self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
 
-        # -------------------------
         # Predictor optimizer
-        # -------------------------
-        self.predictor_optimizer = None
         if self.cfg.has_predictor and self.predictor is not None and self.train_predictor:
-            self.predictor_optimizer = torch.optim.AdamW(
-                self.predictor.parameters(),
-                lr=self.cfg.training.predictor_lr,
-            )
-            self.predictor_optimizer = self.accelerator.prepare(self.predictor_optimizer)
+            if getattr(self, "predictor_optimizer", None) is None:
+                self.predictor_optimizer = torch.optim.AdamW(
+                    self.predictor.parameters(),
+                    lr=self.cfg.training.predictor_lr,
+                )
+                self.predictor_optimizer = self.accelerator.prepare(self.predictor_optimizer)
 
-        # -------------------------
         # Action encoder optimizer (baseline mode)
-        # -------------------------
-        self.action_encoder_optimizer = None
         if self.cfg.model.use_action_encoder:
             if self.action_encoder is None:
                 raise RuntimeError("use_action_encoder=True but action_encoder is None.")
             if self.train_action_encoder:
-                self.action_encoder_optimizer = torch.optim.AdamW(
-                    self.action_encoder.parameters(),
-                    lr=self.cfg.training.action_encoder_lr,
-                )
-                self.action_encoder_optimizer = self.accelerator.prepare(
-                    self.action_encoder_optimizer
-                )
+                if getattr(self, "action_encoder_optimizer", None) is None:
+                    self.action_encoder_optimizer = torch.optim.AdamW(
+                        self.action_encoder.parameters(),
+                        lr=self.cfg.training.action_encoder_lr,
+                    )
+                    self.action_encoder_optimizer = self.accelerator.prepare(
+                        self.action_encoder_optimizer
+                    )
 
-        # -------------------------
         # Decoder optimizer
-        # -------------------------
-        self.decoder_optimizer = None
         if self.cfg.has_decoder and self.decoder is not None and self.train_decoder:
-            self.decoder_optimizer = torch.optim.Adam(
-                self.decoder.parameters(),
-                lr=self.cfg.training.decoder_lr,
-            )
-            self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
+            if getattr(self, "decoder_optimizer", None) is None:
+                self.decoder_optimizer = torch.optim.Adam(
+                    self.decoder.parameters(),
+                    lr=self.cfg.training.decoder_lr,
+                )
+                self.decoder_optimizer = self.accelerator.prepare(self.decoder_optimizer)
 
-        # -------------------------
         # LAM optimizer (LAM mode)
-        # -------------------------
-        self.latent_optimizer = None
         if self.cfg.model.use_lam and self.train_lam:
             if (
                 self.latent_action_model is None
@@ -586,16 +575,18 @@ class Trainer:
                     f"latent_action_down={self.latent_action_down is not None})."
                 )
 
-            latent_params = itertools.chain(
-                self.latent_action_model.parameters(),
-                self.vq_model.parameters(),
-                self.latent_action_down.parameters(),
-            )
-            self.latent_optimizer = torch.optim.AdamW(
-                latent_params,
-                lr=self.cfg.training.latent_lr,
-            )
-            self.latent_optimizer = self.accelerator.prepare(self.latent_optimizer)
+            if getattr(self, "latent_optimizer", None) is None:
+                latent_params = itertools.chain(
+                    self.latent_action_model.parameters(),
+                    self.vq_model.parameters(),
+                    self.latent_action_down.parameters(),
+                )
+                self.latent_optimizer = torch.optim.AdamW(
+                    latent_params,
+                    lr=self.cfg.training.latent_lr,
+                )
+                self.latent_optimizer = self.accelerator.prepare(self.latent_optimizer)
+
 
 
     def monitor_jobs(self, lock):
