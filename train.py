@@ -614,12 +614,8 @@ class Trainer:
             self.accelerator.wait_for_everyone()
             self.train()
             self.accelerator.wait_for_everyone()
-            if self.val_every_x_steps <= 0:
-                self.val()
-                self.logs_flash(step=self.epoch)
-            else:
-                self.val()
-                self.logs_flash(step=self.global_step)
+            self.val()
+            self.logs_flash(step=self.global_step)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
                 ckpt_path, model_name, model_epoch = self.save_ckpt()
                 # main thread only: launch planning jobs on the saved ckpt
