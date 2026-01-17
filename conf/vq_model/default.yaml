@@ -1,5 +1,5 @@
 _target_: models.vq_ema.VectorQuantizerEMA
-num_codes: 16
+num_codes: ${model.num_codes}
 code_dim: ${model.codebook_dim}
 codebook_splits: ${model.codebook_splits}
 ema_decay: ${model.ema_decay}

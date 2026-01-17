@@ -12,6 +12,7 @@ defaults:
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
 ckpt_base_path: ./ # put absolute path here
+debug: False 
 
 hydra:
   run:
@@ -31,72 +32,58 @@ hydra:
             export MASTER_ADDR="$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)",
             "export MASTER_PORT=$(for port in $(shuf -i 30000-65500 -n 20); do if [[ $(netstat -tupln 2>&1 | grep $port | wc -l) -eq 0 ]] ; then echo $port; break; fi; done;)",]
 
+
 training:
   seed: 0
   epochs: 3
-  batch_size: 32 # should >= nodes * tasks_per_node
+  batch_size: 32                   # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
+  num_workers: 18
   encoder_lr: 1e-6
   decoder_lr: 3e-4
   predictor_lr: 5e-4
   action_encoder_lr: 5e-4
   latent_lr: 5e-4
 
-img_size: 224 # should be a multiple of 224
-frameskip: 5
-concat_dim: 1  # only supports 1 
 
-normalize_action: True
+dataset:
+  normalize_action: True
+  action_scale: 100.0
+  frameskip: 5
+  img_size: 224 # should be a multiple of 224
 
-# action encoder
-action_emb_dim: 10 
-num_action_repeat: 1
-
-num_hist: 1
-num_pred: 1 # only supports 1
-has_predictor: True 
-has_decoder: False # set this to False for only training a predictor
 
 model:
   _target_: models.visual_world_model.VWorldModel
-
   # mode selection (XOR with use_action_encoder)
   use_action_encoder: false
   use_lam: true
   use_vq: true
+  has_predictor: True 
+  has_decoder: False # set this to False for only training a predictor
 
-  # dimensions / sequence
-  image_size: ${img_size}
-  num_hist: ${num_hist}
-  num_pred: ${num_pred}
-
-  # training toggles
+   # training toggles
   train_encoder: false
   train_predictor: true
   train_decoder: false
   train_action_encoder: false   # explicit, even though use_action_encoder=false
   train_lam: true               # must be true only if use_lam=true
 
+  action_emb_dim: 10 
+  num_action_repeat: 1
+  num_hist: 1
+  num_pred: 1 # only supports 1
+  concat_dim: 1  # only supports 1 
+  
   # latent-action (VQ) config
   codebook_splits: 1
   codebook_dim: 10              # latent_action_dim must be = codebook_splits * codebook_dim 
   latent_action_dim: 10
+  num_codes: 16
   commitment: 0.1
   ema_decay: 0.95
-
-
-debug: False 
-
-# Planning params for planning eval jobs launched during training
-plan_settings:
-  # plan_cfg_path: conf/plan.yaml # set to null for no planning evals
-  plan_cfg_path: null
-  planner: ['gd', 'cem']
-  goal_source: ['dset', 'random_state']
-  goal_H: [5]
-  alpha: [0.1, 1]
 
 metrics:
   swap_check_every_n_steps: 100
@@ -109,3 +96,15 @@ metrics:
   shuffle_z_threshold: 0.65
   ppl_norm_threshold: 0.1
   deadcode_threshold: 0.5
+
+
+# Planning params for planning eval jobs launched during training
+plan_settings:
+  # plan_cfg_path: conf/plan.yaml # set to null for no planning evals
+  plan_cfg_path: null
+  planner: ['gd', 'cem']
+  goal_source: ['dset', 'random_state']
+  goal_H: [5]
+  alpha: [0.1, 1]
+
+

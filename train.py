@@ -207,6 +207,13 @@ class Trainer:
         self.latent_action_down = None
         self.model = None
 
+        self.encoder_optimizer = None
+        self.predictor_optimizer = None
+        self.decoder_optimizer = None
+        self.action_encoder_optimizer = None
+        self.latent_optimizer = None
+
+
         self.train_encoder = self.cfg.model.train_encoder
         self.train_predictor = self.cfg.model.train_predictor
         self.train_decoder = self.cfg.model.train_decoder
@@ -704,6 +711,8 @@ class Trainer:
             obs, act,_,_ = data
             plot = False  # dont plot at all
             self.model.train()
+            if not self.train_encoder:
+                self.model.encoder.eval()
             (
                 z_out,
                 visual_out,
@@ -748,7 +757,7 @@ class Trainer:
                 was_training = self.model.training
                 self.model.eval()
                 with torch.no_grad():
-
+                    
                     z = encode_output["z"].detach()             # [B,T,P',D']
                     z_src = z[:, : self.model.num_hist]         # [B,H,P',D']
                     z_tgt = z[:, self.model.num_pred :]         # [B,H,P',D']
@@ -1080,9 +1089,9 @@ class Trainer:
     @torch.no_grad()
     def metric_z_swap_score(self, z_src, z_tgt, act_base_h) -> float:
         """
-        Information-bypass (z-swap) score in visual-token space.
+        Information-bypass (z-swap) score in visual-token space.        
 
-        Requires self.model:
+        Requires self.model:     
           - separate_emb(z) -> ({"visual": z_visual}, z_act_base)
           - replace_actions_from_z(z, act_base)
           - predict(z_src) -> z_pred
@@ -1204,7 +1213,7 @@ class Trainer:
             count, sum = value
             to_log = sum / count
             epoch_log[key] = to_log
-        epoch_log["epoch"] = step
+        epoch_log["global_step"] = step
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
         self.epoch_log = OrderedDict()
