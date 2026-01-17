@@ -20,6 +20,7 @@ class CEMPlanner(BasePlanner):
         preprocessor,
         evaluator,
         wandb_run,
+        plan_action_type,
         logging_prefix="plan_0",
         log_filename="logs.json",
         **kwargs,
@@ -32,6 +33,7 @@ class CEMPlanner(BasePlanner):
             evaluator,
             wandb_run,
             log_filename,
+            plan_action_type,
         )
         self.horizon = horizon
         self.topk = topk

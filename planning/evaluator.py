@@ -27,6 +27,8 @@ class PlanEvaluator:  # evaluator for planning
         seed,
         preprocessor,
         n_plot_samples,
+        plan_action_type,
+        action_decoder=None,
     ):
         self.obs_0 = obs_0
         self.obs_g = obs_g
@@ -39,6 +41,10 @@ class PlanEvaluator:  # evaluator for planning
         self.preprocessor = preprocessor
         self.n_plot_samples = n_plot_samples
         self.device = next(wm.parameters()).device
+        self.plan_action_type = plan_action_type
+        self.action_decoder = action_decoder
+        if self.action_decoder is not None:
+            self.action_decoder.eval()
 
         self.plot_full = False  # plot all frames or frames after frameskip
 
@@ -109,8 +115,29 @@ class PlanEvaluator:  # evaluator for planning
         i_final_z_obs = self._get_trajdict_last(i_z_obses, action_len + 1)
 
         # rollout in env
+        env_actions = actions
+        if self.plan_action_type in {"latent", "discrete"}:
+            if self.action_decoder is None:
+                raise ValueError(
+                    "plan_action_type requires an action_decoder for env rollout, but none was provided."
+                )
+            with torch.no_grad():
+                decoded_actions = self.action_decoder(env_actions)
+            if isinstance(decoded_actions, dict):
+                for key in ("actions", "action", "decoded_actions", "recon"):
+                    if key in decoded_actions:
+                        decoded_actions = decoded_actions[key]
+                        break
+                else:
+                    raise ValueError(
+                        "action_decoder returned a dict without a known action tensor key."
+                    )
+            elif isinstance(decoded_actions, (tuple, list)):
+                decoded_actions = decoded_actions[0]
+            env_actions = decoded_actions
+
         exec_actions = rearrange(
-            actions.cpu(), "b t (f d) -> b (t f) d", f=self.frameskip
+            env_actions.detach().cpu(), "b t (f d) -> b (t f) d", f=self.frameskip
         )
         exec_actions = self.preprocessor.denormalize_actions(exec_actions).numpy()
         e_obses, e_states = self.env.rollout(self.seed, self.state_0, exec_actions)
