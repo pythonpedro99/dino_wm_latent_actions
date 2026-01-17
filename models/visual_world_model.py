@@ -397,8 +397,7 @@ class VWorldModel(nn.Module):
         actions_all = actions_all[:, :-1, :]
 
         # Actions to apply after the context frames
-        # For frame index k >= num_obs_init, we use action index k-1 (transition into that frame).
-        # With your existing logic, you condition step-by-step starting at k=num_obs_init.
+        # For frame index k >= num_obs_init, we use action index k (transition into the next frame).
         action = actions_all[:, num_obs_init:, :]  # (B, rollout_steps, A)
 
         # ------------------------------------------------------------------

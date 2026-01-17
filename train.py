@@ -215,7 +215,7 @@ class Trainer:
 
         self.use_action_encoder = self.cfg.model.use_action_encoder
         self.use_lam = self.cfg.model.use_lam
-        self.swap_check_every_n_steps = int(self.s.swap_check_every_n_steps)
+        self.swap_check_every_n_steps = int(self.cfg.metrics.swap_check_every_n_steps)
         self.ppl_check_every_n_steps = int(self.cfg.metrics.ppl_check_every_n_steps)
         self.deadcode_check_every_n_steps = int(self.cfg.metrics.deadcode_check_every_n_steps)
 
