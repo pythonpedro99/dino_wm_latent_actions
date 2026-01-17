@@ -24,6 +24,7 @@ class MPCPlanner(BasePlanner):
         preprocessor,
         evaluator,
         wandb_run,
+        plan_action_type,
         logging_prefix="mpc",
         log_filename="logs.json",
         **kwargs,
@@ -36,6 +37,7 @@ class MPCPlanner(BasePlanner):
             evaluator,
             wandb_run,
             log_filename,
+            plan_action_type,
         )
         self.env = env
         self.max_iter = np.inf if max_iter is None else max_iter
@@ -51,6 +53,7 @@ class MPCPlanner(BasePlanner):
             evaluator=self.evaluator,  # evaluator is shared for mpc and sub_planner
             wandb_run=self.wandb_run,
             log_filename=None,
+            plan_action_type=self.plan_action_type,
         )
         self.is_success = None
         self.action_len = None  # keep track of the step each traj reaches success
@@ -61,12 +64,13 @@ class MPCPlanner(BasePlanner):
         device = actions.device
         mask = torch.tensor(self.is_success).bool()
         actions[mask] = 0
-        masked_actions = rearrange(
-            actions[mask], "... (f d) -> ... f d", f=self.evaluator.frameskip
-        )
-        masked_actions = self.preprocessor.normalize_actions(masked_actions.cpu())
-        masked_actions = rearrange(masked_actions, "... f d -> ... (f d)")
-        actions[mask] = masked_actions.to(device)
+        if self.plan_action_type == "raw":
+            masked_actions = rearrange(
+                actions[mask], "... (f d) -> ... f d", f=self.evaluator.frameskip
+            )
+            masked_actions = self.preprocessor.normalize_actions(masked_actions.cpu())
+            masked_actions = rearrange(masked_actions, "... f d -> ... (f d)")
+            actions[mask] = masked_actions.to(device)
         return actions
 
     def plan(self, obs_0, obs_g, actions=None):

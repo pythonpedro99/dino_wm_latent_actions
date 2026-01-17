@@ -117,6 +117,7 @@ class PlanWorkspace:
         self,
         cfg_dict: dict,
         wm: torch.nn.Module,
+        action_decoder: torch.nn.Module,
         dset,
         env: SubprocVectorEnv,
         env_name: str,
@@ -125,6 +126,7 @@ class PlanWorkspace:
     ):
         self.cfg_dict = cfg_dict
         self.wm = wm
+        self.action_decoder = action_decoder
         self.dset = dset
         self.env = env
         self.env_name = env_name
@@ -138,7 +140,11 @@ class PlanWorkspace:
         self.n_evals = cfg_dict["n_evals"]
         self.goal_source = cfg_dict["goal_source"]
         self.goal_H = cfg_dict["goal_H"]
-        self.action_dim = self.dset.action_dim * self.frameskip
+        self.plan_action_type = cfg_dict["plan_action_type"]
+        if self.plan_action_type in {"latent", "discrete"}:
+            self.action_dim = self.wm.act_feat_dim
+        else:
+            self.action_dim = self.dset.action_dim * self.frameskip
         self.debug_dset_init = cfg_dict["debug_dset_init"]
 
         objective_fn = hydra.utils.call(
@@ -167,6 +173,8 @@ class PlanWorkspace:
             seed=self.eval_seed,
             preprocessor=self.data_preprocessor,
             n_plot_samples=self.cfg_dict["n_plot_samples"],
+            plan_action_type=self.plan_action_type,
+            action_decoder=self.action_decoder,
         )
 
         if self.wandb_run is None or isinstance(
@@ -185,6 +193,7 @@ class PlanWorkspace:
             evaluator=self.evaluator,
             wandb_run=self.wandb_run,
             log_filename=self.log_filename,
+            plan_action_type=self.plan_action_type,
         )
 
         # optional: assume planning horizon equals to goal horizon
@@ -517,6 +526,7 @@ def planning_main(cfg_dict):
     plan_workspace = PlanWorkspace(
         cfg_dict=cfg_dict,
         wm=model,
+        action_decoder=action_decoder,
         dset=dset,
         env=env,
         env_name=model_cfg.env.name,
