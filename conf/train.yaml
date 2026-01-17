@@ -3,7 +3,6 @@ defaults:
   - env: pusht
   - encoder: dino 
   - action_encoder: proprio
-  - proprio_encoder: proprio
   - decoder: vqvae
   - predictor: vit
   - latent_action_model: default
