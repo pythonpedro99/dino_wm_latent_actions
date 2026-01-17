@@ -491,7 +491,7 @@ def planning_main(cfg_dict):
     model_ckpt = (
         Path(model_path) / "checkpoints" / f"model_{cfg_dict['model_epoch']}.pth"
     )
-    model = load_model(model_ckpt, model_cfg,cfg_dict, num_action_repeat,required_keys, device=device)
+    model, action_decoder = load_model(model_ckpt, model_cfg,cfg_dict, num_action_repeat,required_keys, device=device)
 
     # use dummy vector env for wall and deformable envs
     if model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env":
