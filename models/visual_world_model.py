@@ -284,6 +284,7 @@ class VWorldModel(nn.Module):
         """
         loss = 0
         loss_components = {}
+        assert self.plan_action_type == "raw", f"forward() expects plan_action_type='raw' for training, got: {self.plan_action_type}"
         encode_output = self.encode(obs, act)  
         z = encode_output["z"]  # (b, num_frames, num_patches, emb_dim)
         vq_output = encode_output["vq_outputs"]
