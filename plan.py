@@ -31,8 +31,9 @@ ALL_MODEL_KEYS = [
     "decoder",
     "action_encoder",
     "latent_action_model",
-    "latent_vq_model",
+    "vq_model",
     "latent_action_down",
+    "latent_decoder"
 ]
 
 def planning_main_in_dir(working_dir, cfg_dict):
@@ -405,7 +406,7 @@ def load_model(model_ckpt, train_cfg, num_action_repeat, device):
             model_dim=encoder_emb_dim,
             patch_size=getattr(result["encoder"], "patch_size", 1),
         )
-    if "latent_vq_model" not in result:
+    if "vq_model" not in result:
         result["latent_vq_model"] = hydra.utils.instantiate(
             train_cfg.latent_vq_model,
         )

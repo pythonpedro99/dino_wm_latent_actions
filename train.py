@@ -222,6 +222,7 @@ class Trainer:
 
         self.use_action_encoder = self.cfg.model.use_action_encoder
         self.use_lam = self.cfg.model.use_lam
+        self.plan_action_type = self.cfg.model.plan_action_type
         self.swap_check_every_n_steps = int(self.cfg.metrics.swap_check_every_n_steps)
         self.ppl_check_every_n_steps = int(self.cfg.metrics.ppl_check_every_n_steps)
         self.deadcode_check_every_n_steps = int(self.cfg.metrics.deadcode_check_every_n_steps)
@@ -261,10 +262,10 @@ class Trainer:
         if self.train_encoder:
             self._keys_to_save += ["encoder", "encoder_optimizer"]
 
-        if self.cfg.has_predictor and self.train_predictor:
+        if self.cfg.model.has_predictor and self.train_predictor:
             self._keys_to_save += ["predictor", "predictor_optimizer"]
 
-        if self.cfg.has_decoder and self.train_decoder:
+        if self.cfg.model.has_decoder and self.train_decoder:
             self._keys_to_save += ["decoder", "decoder_optimizer"]
 
         if self.use_action_encoder:
@@ -328,6 +329,8 @@ class Trainer:
             for param in self.encoder.parameters():
                 param.requires_grad = False
 
+        self.encoder = self.accelerator.prepare(self.encoder)
+
         # -------------------------
         # action encoder (optional)
         # -------------------------
@@ -388,7 +391,7 @@ class Trainer:
 
         predictor_dim = self.encoder.emb_dim + (cond_dim_per_step * self.cfg.concat_dim)
 
-        if self.cfg.has_predictor:
+        if self.cfg.model.has_predictor:
             if self.predictor is None:
                 self.predictor = hydra.utils.instantiate(
                     self.cfg.predictor,
@@ -399,6 +402,7 @@ class Trainer:
             if not self.train_predictor:
                 for p in self.predictor.parameters():
                     p.requires_grad = False
+            self.predictor = self.accelerator.prepare(self.predictor)
 
         log.info(
             "Predictor dim=%s (encoder=%s, cond_per_step=%s, concat_dim=%s, num_action_repeat=%s, use_action_encoder=%s, use_lam=%s)",
@@ -413,7 +417,7 @@ class Trainer:
 
 
         # initialize decoder
-        if self.cfg.has_decoder:
+        if self.cfg.model.has_decoder:
             if self.decoder is None:
                 if self.cfg.env.decoder_path is not None:
                     decoder_path = os.path.join(
@@ -433,9 +437,7 @@ class Trainer:
             if not self.train_decoder:
                 for param in self.decoder.parameters():
                     param.requires_grad = False
-        self.encoder, self.predictor, self.decoder = self.accelerator.prepare(
-            self.encoder, self.predictor, self.decoder
-        )
+            self.decoder = self.accelerator.prepare(self.decoder)
 
         # -------------------------
         # latent action model (LAM) (optional)
@@ -510,6 +512,7 @@ class Trainer:
             use_action_encoder=self.cfg.model.use_action_encoder,
             use_lam=self.cfg.model.use_lam,
             use_vq=self.cfg.model.use_vq,
+            plan_action_type=self.plan_action_type,
         )
 
 
@@ -537,7 +540,7 @@ class Trainer:
                 self.encoder_optimizer = self.accelerator.prepare(self.encoder_optimizer)
 
         # Predictor optimizer
-        if self.cfg.has_predictor and self.predictor is not None and self.train_predictor:
+        if self.cfg.model.has_predictor and self.predictor is not None and self.train_predictor:
             if getattr(self, "predictor_optimizer", None) is None:
                 self.predictor_optimizer = torch.optim.AdamW(
                     self.predictor.parameters(),
@@ -560,7 +563,7 @@ class Trainer:
                     )
 
         # Decoder optimizer
-        if self.cfg.has_decoder and self.decoder is not None and self.train_decoder:
+        if self.cfg.model.has_decoder and self.decoder is not None and self.train_decoder:
             if getattr(self, "decoder_optimizer", None) is None:
                 self.decoder_optimizer = torch.optim.Adam(
                     self.decoder.parameters(),
@@ -708,7 +711,7 @@ class Trainer:
             )
         ):
             self.global_step += 1
-            obs, act,_,_ = data
+            obs, act,_ = data
             plot = False  # dont plot at all
             self.model.train()
             if not self.train_encoder:
@@ -733,10 +736,10 @@ class Trainer:
             if self.encoder_optimizer and self.model.train_encoder:
                 self.encoder_optimizer.step()
 
-            if self.decoder_optimizer and self.cfg.has_decoder and self.model.train_decoder:
+            if self.decoder_optimizer and self.cfg.model.has_decoder and self.model.train_decoder:
                 self.decoder_optimizer.step()
 
-            if self.predictor_optimizer and self.cfg.has_predictor and self.model.train_predictor:
+            if self.predictor_optimizer and self.cfg.model.has_predictor and self.model.train_predictor:
                 self.predictor_optimizer.step()
 
             if self.action_encoder_optimizer:
@@ -837,9 +840,9 @@ class Trainer:
                     self.model.train()
 
             
-            if self.cfg.has_decoder and plot:
+            if self.cfg.model.has_decoder and plot:
                 # only eval images when plotting due to speed
-                if self.cfg.has_predictor:
+                if self.cfg.model.has_predictor:
                     z_obs_out, z_act_out = self.model.separate_emb(z_out)
                     z_gt = self.model.encode_obs(obs)
                     z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
@@ -897,7 +900,7 @@ class Trainer:
 
     def val(self):
         self.model.eval()
-        if self.accelerator.is_main_process and len(self.train_traj_dset) > 0 and self.cfg.has_predictor:
+        if self.accelerator.is_main_process and len(self.train_traj_dset) > 0 and self.cfg.model.has_predictor:
             with torch.no_grad():
                 val_rollout_logs = self.openloop_rollout(self.val_traj_dset, mode="val")
                 val_rollout_logs = {
@@ -915,7 +918,7 @@ class Trainer:
                     position=1,
                 )
             ):
-                obs, act, _,_ = data
+                obs, act, _ = data
                 plot = i == 0
                 z_out, visual_out, visual_reconstructed, loss, loss_components, encode_output = self.model(
                     obs, act
@@ -928,9 +931,9 @@ class Trainer:
                     key: value.mean().item() for key, value in loss_components.items()
                 }
 
-                if self.cfg.has_decoder and plot:
+                if self.cfg.model.has_decoder and plot:
                     # only eval images when plotting due to speed
-                    if self.cfg.has_predictor:
+                    if self.cfg.model.has_predictor:
                         z_obs_out, z_act_out = self.model.separate_emb(z_out)
                         z_gt = self.model.encode_obs(obs)
                         z_tgt = slice_trajdict_with_t(z_gt, start_idx=self.model.num_pred)
@@ -1056,7 +1059,7 @@ class Trainer:
                     else:
                         logs[f"z_{k}_err_rollout{postfix}"] = [div_loss[k]]
 
-                if self.cfg.has_decoder:
+                if self.cfg.model.has_decoder:
                     visuals = self.model.decode_obs(z_obses)[0]["visual"]
                     imgs = torch.cat([obs["visual"], visuals[0].cpu()], dim=0)
                     self.plot_imgs(

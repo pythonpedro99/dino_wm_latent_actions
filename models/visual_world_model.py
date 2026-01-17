@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torchvision import transforms
 from einops import rearrange, repeat
+from typing import Optional
 
 class VWorldModel(nn.Module):
     def __init__(
@@ -25,6 +26,7 @@ class VWorldModel(nn.Module):
         use_action_encoder,
         use_lam,
         use_vq,
+        plan_action_type: Optional[str] = None,
         action_encoder=None,
         latent_action_model=None,
         vq_model=None,
@@ -32,6 +34,7 @@ class VWorldModel(nn.Module):
     ):
         super().__init__()
 
+        self.plan_action_type = plan_action_type
         self.use_action_encoder = use_action_encoder
         self.use_lam = use_lam
         self.use_vq = use_vq
@@ -147,48 +150,57 @@ class VWorldModel(nn.Module):
         latent_actions = None
         quantized_latent_actions = None
 
-        if self.use_action_encoder:
-            act_base = self.encode_act(act)  # (B, T, A)
+        if self.plan_action_type == "raw":
+            if self.use_action_encoder:
+                act_base = self.encode_act(act)  # (B, T, A_feat)
+            elif self.use_lam:
+                z_a = self.latent_action_model(z_visual)["action_patches"]
+                z_a_down = self.latent_action_down(z_a)
+                z_a_down_shifted = torch.cat([z_a_down[:, 1:], z_a_down[:, -1:]], dim=1)
+                latent_actions = z_a_down_shifted.squeeze(2)
+
+                if self.use_vq:
+                    vq_outputs = self.vq_model(z_a_down_shifted)
+                    quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)
+                    vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)
+                    act_base = quantized_latent_actions
+                else:
+                    act_base = latent_actions
+            else:
+                raise RuntimeError("plan_action_type='raw' but neither action encoder nor LAM is enabled.")
+
+        elif self.plan_action_type in ("latent", "discrete"):
+            # Explicit: use provided action vectors as-is; do NOT encode and do NOT infer from obs
+            act_base = act
 
         else:
-            # ----- latent actions (continuous) -----
-            z_a = self.latent_action_model(z_visual)["action_patches"]  # (B, T, F?, A0)
-            z_a_down = self.latent_action_down(z_a)                     # (B, T, 1, A)
+            raise ValueError(f"Unsupported plan_action_type: {self.plan_action_type}")
 
-            z_a_down_shifted = torch.cat([z_a_down[:, 1:], z_a_down[:, -1:]], dim=1)  # (B, T, 1, A)
-            latent_actions = z_a_down_shifted.squeeze(2)                               # (B, T, A)
+        if act_base.shape[-1] != self.act_feat_dim:
+            raise ValueError(
+                f"Action dim mismatch: got {act_base.shape[-1]}, expected {self.act_feat_dim}. "
+                f"plan_action_type={self.plan_action_type}. "
+                "If using discrete/latent, pass codebook vectors in the expected feature dim "
+                "(or add a projection)."
+            )
 
-            if self.use_vq:
-                vq_outputs = self.vq_model(z_a_down_shifted)
-                quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)             # (B, T, A)
-                vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)               # (B, T)
-                act_base = quantized_latent_actions
-            else:
-                # no VQ: use continuous latent actions for conditioning
-                act_base = latent_actions
-
-        assert act_base.shape[-1] == self.act_feat_dim, (act_base.shape, self.act_feat_dim)
-
-        # ----- concat modes -----
         if self.concat_dim == 0:
-            act_token = act_base.unsqueeze(2)  # (B, T, 1, A)
-            z = torch.cat([z_visual, act_token], dim=2)
-
+            z = torch.cat([z_visual, act_base.unsqueeze(2)], dim=2)
         elif self.concat_dim == 1:
             act_tiled = repeat(act_base.unsqueeze(2), "b t 1 a -> b t p a", p=z_visual.shape[2])
             act_repeated = act_tiled.repeat(1, 1, 1, self.num_action_repeat)
             z = torch.cat([z_visual, act_repeated], dim=3)
-
         else:
             raise ValueError(f"Unsupported concat_dim: {self.concat_dim}")
 
         return {
             "z": z,
-            "vq_outputs": vq_outputs,                        
-            "latent_actions": latent_actions,                 
-            "quantized_latent_actions": quantized_latent_actions, 
+            "vq_outputs": vq_outputs,
+            "latent_actions": latent_actions,
+            "quantized_latent_actions": quantized_latent_actions,
             "visual_embs": z_visual,
         }
+
 
 
     def encode_act(self, act):
@@ -357,66 +369,65 @@ class VWorldModel(nn.Module):
         return z
 
     def rollout(self, obs, act, num_obs_init):
-        """
-        Roll out predictions in latent space by iteratively predicting next latents and
-        injecting the corresponding action conditioning.
-
-        input:
-            obs  (dict): full trajectory (B, T, C, H, W)
-            act  (tensor): provided actions (B, T, A_raw) in baseline mode; ignored in LAM mode
-            num_obs_init (int): number of initial frames to use as context
-
-        output:
-            z_obses: dict of predicted visual latents
-            z: full latent sequence (including action conditioning representation)
-        """
         encode_output = self.encode(obs, act)
 
-        # Use only the initial context frames from encoded latents
-        z = encode_output["z"][:, :num_obs_init]  # (B, num_obs_init, ...)
+        # initial context
+        z = encode_output["z"][:, :num_obs_init]
 
-        # ------------------------------------------------------------------
-        # Select the action stream to condition rollout on
-        # We want one action vector per timestep, aligned with frames.
-        # We drop the last action because there are (T-1) transitions for T frames.
-        # ------------------------------------------------------------------
-        if self.use_lam:
-            if self.use_vq:
-                actions_all = encode_output["quantized_latent_actions"]
-                if actions_all is None:
-                    raise RuntimeError("use_lam=True,use_vq=True but quantized_latent_actions is None.")
+        # ------------------------------------------------------------
+        # Select the action stream to condition rollout on (explicit)
+        # ------------------------------------------------------------
+        if self.plan_action_type == "raw":
+            if self.use_action_encoder:
+                actions_all = self.encode_act(act)  # (B,T,Afeat)
+            elif self.use_lam:
+                # In raw mode you allow inference (current behavior)
+                if self.use_vq:
+                    actions_all = encode_output["quantized_latent_actions"]
+                    if actions_all is None:
+                        raise RuntimeError("plan_action_type='raw': expected quantized_latent_actions but got None.")
+                else:
+                    actions_all = encode_output["latent_actions"]
+                    if actions_all is None:
+                        raise RuntimeError("plan_action_type='raw': expected latent_actions but got None.")
             else:
-                actions_all = encode_output["latent_actions"]
-                if actions_all is None:
-                    raise RuntimeError("use_lam=True,use_vq=False but latent_actions is None.")
+                raise RuntimeError("plan_action_type='raw' but neither use_action_encoder nor use_lam is enabled.")
+
+        elif self.plan_action_type in ("latent", "discrete"):
+            # Planner provides already-embedded action vectors
+            actions_all = act  # (B,T,Afeat)
+
         else:
-            # baseline: use provided actions
-            actions_all = self.encode_act(act)
+            raise ValueError(f"Unsupported plan_action_type: {self.plan_action_type}")
 
-        # (B, T-1, A) transitions
+        # Validate dim early (prevents silent shape bugs)
+        if actions_all.shape[-1] != self.act_feat_dim:
+            raise ValueError(
+                f"Action dim mismatch in rollout: got {actions_all.shape[-1]}, expected {self.act_feat_dim}. "
+                f"plan_action_type={self.plan_action_type}"
+            )
+
+        # transitions for T frames
         actions_all = actions_all[:, :-1, :]
+        action = actions_all[:, num_obs_init:, :]
 
-        # Actions to apply after the context frames
-        # For frame index k >= num_obs_init, we use action index k (transition into the next frame).
-        action = actions_all[:, num_obs_init:, :]  # (B, rollout_steps, A)
-
-        # ------------------------------------------------------------------
+        # ------------------------------------------------------------
         # Iterative rollout
-        # ------------------------------------------------------------------
+        # ------------------------------------------------------------
         t = 0
         inc = 1
         while t < action.shape[1]:
-            z_pred = self.predict(z[:, -self.num_hist:])      # predict on the last num_hist frames
-            z_new = z_pred[:, -inc:, ...]                     # take newest predicted frame(s)
-            z_new = self.replace_actions_from_z(z_new, action[:, t:t + inc, :])  # inject action
+            z_pred = self.predict(z[:, -self.num_hist:])
+            z_new = z_pred[:, -inc:, ...]
+            z_new = self.replace_actions_from_z(z_new, action[:, t:t + inc, :])
             z = torch.cat([z, z_new], dim=1)
             t += inc
 
-        # Optional: one extra prediction without injecting an action (matches your current behavior)
         z_pred = self.predict(z[:, -self.num_hist:])
         z_new = z_pred[:, -1:, ...]
         z = torch.cat([z, z_new], dim=1)
 
         z_obses, _ = self.separate_emb(z)
         return z_obses, z
+
 
