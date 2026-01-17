@@ -350,84 +350,85 @@ class PlanWorkspace:
         return logs
 
 
-def load_ckpt(snapshot_path, device):
+def load_ckpt(snapshot_path: Path, device, required_keys: set[str]):
+    """
+    Loads ONLY the objects listed in required_keys from the checkpoint payload (if present),
+    plus mandatory metadata 'epoch'. No ALL_MODEL_KEYS filtering.
+    """
     with snapshot_path.open("rb") as f:
         payload = torch.load(f, map_location=device)
+
+    if "epoch" not in payload:
+        raise KeyError(f"Checkpoint missing 'epoch' field: {snapshot_path}")
+
+    result = {"epoch": payload["epoch"]}
     loaded_keys = []
-    result = {}
-    for k, v in payload.items():
-        if k in ALL_MODEL_KEYS:
+
+    for k in required_keys:
+        if k in payload:
+            v = payload[k]
+            if hasattr(v, "to"):
+                v = v.to(device)
+            result[k] = v
             loaded_keys.append(k)
-            result[k] = v.to(device)
-    result["epoch"] = payload["epoch"]
+
+    result["_loaded_keys"] = sorted(loaded_keys)
     return result
 
 
-def load_model(model_ckpt, train_cfg, num_action_repeat, device):
-    result = {}
-    if model_ckpt.exists():
-        result = load_ckpt(model_ckpt, device)
-        print(f"Resuming from epoch {result['epoch']}: {model_ckpt}")
+def load_model(model_ckpt: Path, model_cfg, cfg_dict: dict, num_action_repeat: int, required_keys: set[str], device):
+    """
+    Strict loading: checkpoint must contain all required_keys.
+    action_encoder is loaded (if required/present) but returned separately and NOT passed into the model.
+    Returns:
+      model, action_decoder
+    """
+    if not model_ckpt.exists():
+        raise FileNotFoundError(f"Strict loading requires a checkpoint, but it does not exist: {model_ckpt}")
 
-    if "encoder" not in result:
-        result["encoder"] = hydra.utils.instantiate(
-            train_cfg.encoder,
-        )
-    if "predictor" not in result:
-        raise ValueError("Predictor not found in model checkpoint")
+    result = load_ckpt(model_ckpt, device=device, required_keys=required_keys)
+    print(f"Resuming from epoch {result['epoch']}: {model_ckpt}")
 
-    if train_cfg.has_decoder and "decoder" not in result:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-        if train_cfg.env.decoder_path is not None:
-            decoder_path = os.path.join(base_path, train_cfg.env.decoder_path)
-            ckpt = torch.load(decoder_path)
-            if isinstance(ckpt, dict):
-                result["decoder"] = ckpt["decoder"]
-            else:
-                result["decoder"] = torch.load(decoder_path)
-        else:
-            raise ValueError(
-                "Decoder path not found in model checkpoint \
-                                and is not provided in config"
-            )
-    elif not train_cfg.has_decoder:
-        result["decoder"] = None
-
-    encoder_emb_dim = result["encoder"].emb_dim
-    latent_dim = (
-        train_cfg.model.codebook_splits * train_cfg.model.codebook_dim
-        if hasattr(train_cfg.model, "codebook_splits")
-        else train_cfg.model.latent_action_dim
-    )
-    if "latent_action_model" not in result:
-        result["latent_action_model"] = hydra.utils.instantiate(
-            train_cfg.latent_action_model,
-            in_dim=encoder_emb_dim,
-            model_dim=encoder_emb_dim,
-            patch_size=getattr(result["encoder"], "patch_size", 1),
+    missing = sorted(list(required_keys - set(result.keys())))
+    if missing:
+        present = sorted([k for k in result.keys() if k not in {"epoch", "_loaded_keys"}])
+        raise ValueError(
+            "Strict loading failed: checkpoint does not contain all required components.\n"
+            f"  checkpoint: {model_ckpt}\n"
+            f"  missing: {missing}\n"
+            f"  present: {present}\n"
         )
-    if "vq_model" not in result:
-        result["latent_vq_model"] = hydra.utils.instantiate(
-            train_cfg.latent_vq_model,
-        )
-    if "latent_action_down" not in result:
-        result["latent_action_down"] = nn.Linear(encoder_emb_dim, latent_dim)
+    action_decoder = result.get("action_decoder", None)
 
     model = hydra.utils.instantiate(
-        train_cfg.model,
-        encoder=result["encoder"],
-        action_encoder=result["action_encoder"],
-        predictor=result["predictor"],
-        decoder=result["decoder"],
-        action_dim=train_cfg.action_emb_dim,
-        concat_dim=train_cfg.concat_dim,
+        model_cfg.model,                 # this should resolve to VWorldModel via Hydra
+        image_size=model_cfg.image_size,
+        num_hist=model_cfg.num_hist,
+        num_pred=model_cfg.num_pred,
+        encoder=result.get("encoder"),
+        decoder=result.get("decoder", None),
+        predictor=result.get("predictor"),
+        codebook_splits=model_cfg.model.codebook_splits,
+        codebook_dim=model_cfg.model.codebook_dim,
+        action_dim=model_cfg.action_emb_dim,
+        concat_dim=model_cfg.concat_dim,
+        latent_action_dim=model_cfg.model.latent_action_dim,
         num_action_repeat=num_action_repeat,
-        latent_action_model=result["latent_action_model"],
-        latent_vq_model=result["latent_vq_model"],
-        latent_action_down=result["latent_action_down"],
+        train_encoder=model_cfg.train_encoder,
+        train_predictor=model_cfg.train_predictor,
+        train_decoder=model_cfg.train_decoder,
+        train_lam=model_cfg.train_lam,
+        use_action_encoder=cfg_dict["use_action_encoder"],
+        use_lam=cfg_dict["use_lam"],
+        use_vq=cfg_dict["use_vq"],
+        plan_action_type=cfg_dict.get("plan_action_type"),
+        action_encoder=result.get("action_encoder", None),
+        latent_action_model=result.get("latent_action_model", None),
+        vq_model=result.get("vq_model", None),
+        latent_action_down=result.get("latent_action_down", None),
     )
     model.to(device)
-    return model
+    return model, action_decoder
 
 
 class DummyWandbRun:
@@ -463,6 +464,20 @@ def planning_main(cfg_dict):
     with open(os.path.join(model_path, "hydra.yaml"), "r") as f:
         model_cfg = OmegaConf.load(f)
 
+    required_keys = {"encoder","predictor"}
+    plan_action_type = cfg_dict["plan_action_type"]
+    use_action_encoder = cfg_dict["use_action_encoder"]
+
+    if use_action_encoder and plan_action_type == "raw":
+        required_keys.add("action_encoder")
+
+    if not use_action_encoder and plan_action_type in {"discrete"}:
+        required_keys.add("vq_model")
+        required_keys.add("action_decoder")
+
+    if not use_action_encoder and plan_action_type == "latent":
+        required_keys.add("action_decoder")
+
     seed(cfg_dict["seed"])
     _, dset = hydra.utils.call(
         model_cfg.env.dataset,
@@ -476,7 +491,7 @@ def planning_main(cfg_dict):
     model_ckpt = (
         Path(model_path) / "checkpoints" / f"model_{cfg_dict['model_epoch']}.pth"
     )
-    model = load_model(model_ckpt, model_cfg, num_action_repeat, device=device)
+    model = load_model(model_ckpt, model_cfg,cfg_dict, num_action_repeat,required_keys, device=device)
 
     # use dummy vector env for wall and deformable envs
     if model_cfg.env.name == "wall" or model_cfg.env.name == "deformable_env":
@@ -513,7 +528,7 @@ def planning_main(cfg_dict):
     return logs
 
 
-@hydra.main(config_path="conf", config_name="plan")
+@hydra.main(config_path="conf", config_name="plan_pusht")
 def main(cfg: OmegaConf):
     with open_dict(cfg):
         cfg["saved_folder"] = os.getcwd()

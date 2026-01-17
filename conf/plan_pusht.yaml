@@ -31,6 +31,10 @@ n_evals: 50
 goal_source: 'dset'
 goal_H: 5 
 n_plot_samples: 10
+plan_action_type: "raw"  # "raw" or "latent" or "discrete" raw = baseline
+use_action_encoder: True   # True for baseline
+use_lam: False   # always false for planning
+use_vq: False   # always false for planning
 
 debug_dset_init: False
 
@@ -45,7 +49,7 @@ planner:
   max_iter: null 
   n_taken_actions: 5
   sub_planner:
-    target: planning.cem.CEMPlanner
+    target: planning.cem.CEMPlanner  # when plan_action_type is "discrete" use cem.DiscreteCEMPlanner only 
     horizon: 5
     topk: 30
     num_samples: 300
