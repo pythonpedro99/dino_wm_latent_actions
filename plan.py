@@ -154,6 +154,8 @@ class PlanWorkspace:
         self.data_preprocessor = Preprocessor(
             action_mean=self.dset.action_mean,
             action_std=self.dset.action_std,
+            state_mean=self.dset.state_mean,
+            state_std=self.dset.state_std,
             transform=self.dset.transform,
         )
 

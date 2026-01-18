@@ -185,20 +185,15 @@ class PlanEvaluator:  # evaluator for planning
 
         visual_dists = np.linalg.norm(e_obs["visual"] - self.obs_g["visual"], axis=1)
         mean_visual_dist = np.mean(visual_dists)
-        proprio_dists = np.linalg.norm(e_obs["proprio"] - self.obs_g["proprio"], axis=1)
-        mean_proprio_dist = np.mean(proprio_dists)
 
         e_obs = move_to_device(self.preprocessor.transform_obs(e_obs), self.device)
         e_z_obs = self.wm.encode_obs(e_obs)
         div_visual_emb = torch.norm(e_z_obs["visual"] - i_z_obs["visual"]).item()
-        div_proprio_emb = torch.norm(e_z_obs["proprio"] - i_z_obs["proprio"]).item()
 
         logs.update({
-            "mean_visual_dist": mean_visual_dist,
-            "mean_proprio_dist": mean_proprio_dist,
-            "mean_div_visual_emb": div_visual_emb,
-            "mean_div_proprio_emb": div_proprio_emb,
-        })
+                "mean_pixel_l2": mean_visual_dist,
+                "mean_emb_l2": div_visual_emb,
+            })
 
         return logs, successes
 

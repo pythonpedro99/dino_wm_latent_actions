@@ -149,6 +149,8 @@ class Trainer:
                     id=wandb_run_id,
                     resume="allow",
                 )
+            wandb.define_metric("global_step")
+            wandb.define_metric("*", step_metric="global_step")
             OmegaConf.set_struct(cfg, False)
             cfg.wandb_run_id = self.wandb_run.id
             OmegaConf.set_struct(cfg, True)
@@ -239,7 +241,7 @@ class Trainer:
         self._swap_bad_streak = 0
         self._ppl_idx_window = deque(maxlen=self.ppl_batch_window)
         self._dead_idx_window = deque(maxlen=self.deadcode_batch_window)
-        self.codebook_size = self.cfg.model.codebook_dim * self.cfg.model.codebook_splits
+        self.codebook_size = self.cfg.model.num_codes
 
 
         if self.use_action_encoder == self.use_lam:
@@ -379,6 +381,7 @@ class Trainer:
             if hasattr(self, "train_action_encoder") and not self.train_action_encoder:
                 for p in self.action_encoder.parameters():
                     p.requires_grad = False
+                self.action_encoder.eval()
         else:
             self.action_encoder = None
             action_emb_dim = 0
