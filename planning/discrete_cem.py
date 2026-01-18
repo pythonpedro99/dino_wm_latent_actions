@@ -62,12 +62,12 @@ class DiscreteCEMPlanner(BasePlanner):
         self.logging_prefix = logging_prefix
 
         # Discrete-CEM hyperparams
-        self.pseudocount = float(kwargs.get("pseudocount", 1.0))
-        self.momentum = float(kwargs.get("momentum", 0.9))
-        self.min_prob = float(kwargs.get("min_prob", 1e-8))
-        self.init_smoothing = float(kwargs.get("init_smoothing", 1e-3))
-        self.sample_temperature = float(kwargs.get("sample_temperature", 1.0))
-        self.use_mode_as_first_sample = bool(kwargs.get("use_mode_as_first_sample", True))
+        self.pseudocount = float(kwargs.get("pseudocount"))
+        self.momentum = float(kwargs.get("momentum"))
+        self.min_prob = float(kwargs.get("min_prob"))
+        self.init_smoothing = float(kwargs.get("init_smoothing"))
+        self.sample_temperature = float(kwargs.get("sample_temperature"))
+        self.use_mode_as_first_sample = bool(kwargs.get("use_mode_as_first_sample"))
 
         # Return selection:
         #  - return_mode=True returns argmax(pi) plan (discrete analogue of mean in continuous CEM)
