@@ -109,9 +109,9 @@ class PlanEvaluator:  # evaluator for planning
         )
         with torch.no_grad():
             i_z_obses, _ = self.wm.rollout(
-                obs_0=trans_obs_0,
+                obs=trans_obs_0,
                 act=actions,
-                num_hist=self.wm.num_hist
+                num_obs_init=self.wm.num_hist
             )
         i_final_z_obs = self._get_trajdict_last(i_z_obses, action_len + 1)
 

@@ -263,8 +263,9 @@ class DiscreteCEMPlanner(BasePlanner):
 
                 with torch.no_grad():
                     i_z_obses, _ = self.wm.rollout(
-                        obs_0=cur_trans_obs_0,
+                        obs=cur_trans_obs_0,
                         act=cand_actions,
+                        num_obs_init=self.wm.num_hist
                     )
 
                 loss = self.objective_fn(i_z_obses, cur_z_obs_g).reshape(-1)  # (N,)

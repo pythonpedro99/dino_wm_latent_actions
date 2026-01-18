@@ -95,9 +95,9 @@ class GDPlanner(BasePlanner):
         for i in range(self.opt_steps):
             optimizer.zero_grad()
             i_z_obses, i_zs = self.wm.rollout(
-                obs_0=trans_obs_0,
+                obs=trans_obs_0,
                 act=actions,
-                num_hist=self.wm.num_hist
+                num_obs_init=self.wm.num_hist
             )
             loss = self.objective_fn(i_z_obses, z_obs_g_detached)  # (n_evals, )
             total_loss = loss.mean() * n_evals  # loss for each eval is independent
