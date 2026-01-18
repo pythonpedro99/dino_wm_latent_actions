@@ -358,6 +358,7 @@ class VWorldModel(nn.Module):
         else:
             visual_reconstructed = None
 
+        loss_components["total_loss"] = loss
         return z_pred, visual_pred, visual_reconstructed, loss, loss_components, encode_output
 
     def replace_actions_from_z(self, z, act):

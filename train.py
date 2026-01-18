@@ -636,6 +636,7 @@ class Trainer:
             self.accelerator.wait_for_everyone()
             self.train()
             self.accelerator.wait_for_everyone()
+            self.logs_flash(step=self.global_step)
             self.val()
             self.logs_flash(step=self.global_step)
             if self.epoch % self.cfg.training.save_every_x_epoch == 0:
@@ -1003,7 +1004,7 @@ class Trainer:
 
 
     def openloop_rollout(
-            self, dset, num_rollout=8, rand_start_end=True, min_horizon=2, mode="train"
+            self, dset, num_rollout=10, rand_start_end=True, min_horizon=5, mode="train"
         ):
         np.random.seed(self.cfg.training.seed)
         min_horizon = min_horizon + self.cfg.num_hist
@@ -1231,6 +1232,7 @@ class Trainer:
         epoch_log["global_step"] = step
         if self.accelerator.is_main_process:
             self.wandb_run.log(epoch_log)
+            self.jsonl.log(dict(epoch_log))  
         self.epoch_log = OrderedDict()
 
 
