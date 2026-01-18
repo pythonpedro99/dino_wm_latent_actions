@@ -412,7 +412,7 @@ def load_model(model_ckpt: Path, model_cfg, cfg_dict: dict, num_action_repeat: i
     model = hydra.utils.instantiate(
         model_cfg.model,                 # this should resolve to VWorldModel via Hydra
         image_size=model_cfg.image_size,
-        num_hist=model_cfg.num_hist,
+        num_hist= 1,                      # we enforce num_hist to be 1 for planning and advise training to match that
         num_pred=model_cfg.num_pred,
         encoder=result.get("encoder"),
         decoder=result.get("decoder", None),
