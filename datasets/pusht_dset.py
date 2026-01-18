@@ -12,16 +12,28 @@ from .traj_dset import TrajDataset, TrajSlicerDataset
 
 decord.bridge.set_bridge("torch")
 
-# precomputed dataset stats
-ACTION_MEAN = torch.tensor([-0.00757417, 0.00833888], dtype=torch.float32)
-ACTION_STD  = torch.tensor([0.18500997, 0.18254188], dtype=torch.float32)
+# === Stats for subset 10k ===
+#   split: train
+#     - rel_actions.pth [RAW]: samples=2,214,000 feat_dim=2 (scale=1.0, stride=1)
+#       mean: [-0.36953 ,  0.328818]
+#       std : [14.843125, 14.722512]
+#     - rel_actions.pth [SCALED/STRIDED]: samples=2,214,000 feat_dim=2 (scale=100.0, stride=1)
+#       mean: [-0.003695,  0.003288]
+#       std : [0.148431, 0.147225]
+#     - states.pth: samples=2,214,000 feat_dim=5 (scale=1.0, stride=1)
+#       mean: [115.863365, 148.13002 , 123.305336, 139.50023 ,   1.080451]
+#       std : [135.9158  , 162.18025 , 132.06897 , 147.15077 ,   1.735476]
+#     - states_constant.pth: missing
+
+ACTION_MEAN = torch.tensor([-0.003695,  0.003288], dtype=torch.float32)
+ACTION_STD  = torch.tensor([0.148431, 0.147225], dtype=torch.float32)
 
 STATE_MEAN = torch.tensor(
-    [228.80013047, 292.23928572, 243.38166685, 275.10615822, 2.13491690],
+    [115.863365, 148.13002 , 123.305336, 139.50023 ,   1.080451],
     dtype=torch.float32,
 )
 STATE_STD = torch.tensor(
-    [103.37505838, 98.88583176, 72.14114198, 73.42942474, 1.92691758],
+    [135.9158  , 162.18025 , 132.06897 , 147.15077 ,   1.735476],
     dtype=torch.float32,
 )
 
