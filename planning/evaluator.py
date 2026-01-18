@@ -66,17 +66,21 @@ class PlanEvaluator:  # evaluator for planning
         return new_dct
 
     def _get_traj_last(self, traj_data, length):
-        last_index = np.where(length == np.inf, -1, length - 1)
-        last_index = last_index.astype(int)
+        # last_index: -1 where length==inf, else length-1
+        last_index = np.where(length == np.inf, -1, length - 1).astype(np.int64)
+
         if isinstance(traj_data, torch.Tensor):
-            traj_data = traj_data[np.arange(traj_data.shape[0]), last_index].unsqueeze(
-                1
-            )
+            B = traj_data.shape[0]
+            idx0 = torch.arange(B, device=traj_data.device)
+            idx1 = torch.as_tensor(last_index, device=traj_data.device, dtype=torch.long)
+            traj_last = traj_data[idx0, idx1].unsqueeze(1)
+            return traj_last
         else:
-            traj_data = np.expand_dims(
+            traj_last = np.expand_dims(
                 traj_data[np.arange(traj_data.shape[0]), last_index], axis=1
             )
-        return traj_data
+            return traj_last
+
 
     def _mask_traj(self, data, length):
         """

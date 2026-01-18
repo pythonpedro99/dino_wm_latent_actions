@@ -7,6 +7,19 @@ from .base_planner import BasePlanner
 from utils import move_to_device
 
 
+import json
+import numpy as np
+import torch
+import torch.nn.functional as F
+from einops import repeat
+
+# NOTE: DiscreteCEMPlanner depends on these symbols existing in your codebase:
+# - BasePlanner
+# - move_to_device
+#
+# This class only updates the 8.3 hotspot: _nearest_code_indices_splitwise
+# and adds codebook/norm caching + chunked squared-distance NN.
+
 class DiscreteCEMPlanner(BasePlanner):
     """
     Discrete CEM planner over the VQ codebook on self.wm.vq_model.
@@ -74,6 +87,17 @@ class DiscreteCEMPlanner(BasePlanner):
         #  - return_mode=False returns best sampled plan seen so far
         self.return_mode = bool(kwargs.get("return_mode", True))
 
+        # -------------------------
+        # 8.3 NN optimization knobs
+        # -------------------------
+        # Chunk size for nearest-neighbor search; tune based on GPU memory.
+        self.nn_chunk_size = int(kwargs.get("nn_chunk_size", 8192))
+
+        # Codebook caching (embedding + squared norms) to avoid repeated recompute.
+        self._cb_cache = None
+        self._cb_norm2_cache = None
+        self._cb_cache_key = None  # (device, dtype, shape, data_ptr)
+
     # -------------------------
     # VQ model / codebook access
     # -------------------------
@@ -90,16 +114,26 @@ class DiscreteCEMPlanner(BasePlanner):
     def _get_codebook(self) -> torch.Tensor:
         """
         Returns codebook embedding matrix of shape (K, code_dim) on self.device.
+        Caches squared norms for fast NN in init_pi warm-start.
         """
         vq = self._get_vq()
         cb = vq.embedding
         if not isinstance(cb, torch.Tensor):
             cb = torch.as_tensor(cb)
+
         cb = cb.to(device=self.device, dtype=torch.float32)
         K, D = int(vq.num_codes), int(vq.code_dim)
         if cb.ndim != 2 or cb.shape[0] != K or cb.shape[1] != D:
             raise ValueError(f"Expected vq_model.embedding shape ({K}, {D}), got {tuple(cb.shape)}.")
-        return cb
+
+        # If embedding storage moved/recreated, refresh caches.
+        key = (cb.device, cb.dtype, tuple(cb.shape), cb.data_ptr())
+        if self._cb_cache_key != key:
+            self._cb_cache_key = key
+            self._cb_cache = cb
+            self._cb_norm2_cache = (cb * cb).sum(dim=1)  # (K,), float32
+
+        return self._cb_cache
 
     def _check_action_dim(self):
         vq = self._get_vq()
@@ -157,21 +191,64 @@ class DiscreteCEMPlanner(BasePlanner):
         idx = torch.argmax(pi, dim=-1)  # (B,H,S)
         return self._decode_indices_to_actions(idx, codebook)
 
+    # -------------------------
+    # 8.3 Optimized NN warm-start
+    # -------------------------
     def _nearest_code_indices_splitwise(
         self, actions: torch.Tensor, codebook: torch.Tensor, S: int, D: int
     ) -> torch.Tensor:
         """
         actions: (B, T, S*D)
         returns indices: (B, T, S) via splitwise nearest neighbor in codebook.
+
+        Optimized vs torch.cdist:
+          Uses squared L2 distances:
+            ||a-b||^2 = ||a||^2 + ||b||^2 - 2 a @ b
+          Caches ||codebook||^2 and chunks over (B*T*S) to limit memory.
         """
         B, T, AD = actions.shape
         if AD != S * D:
             raise ValueError(f"Expected actions last dim {S*D}, got {AD}.")
-        z = actions.reshape(B, T, S, D).to(torch.float32)     # (B,T,S,D)
-        flat = z.reshape(B * T * S, D)                        # (B*T*S, D)
-        dists = torch.cdist(flat, codebook)                   # (B*T*S, K)
-        idx = torch.argmin(dists, dim=-1)
-        return idx.reshape(B, T, S)
+
+        # (B,T,S,D) -> (N,D)
+        z = actions.reshape(B, T, S, D).to(torch.float32)
+        flat = z.reshape(B * T * S, D)  # (N, D)
+
+        # Use cached norms if the passed codebook matches cached storage
+        if (
+            getattr(self, "_cb_cache", None) is codebook
+            and getattr(self, "_cb_norm2_cache", None) is not None
+        ):
+            cb = codebook
+            cb_norm2 = self._cb_norm2_cache  # (K,)
+        else:
+            cb = codebook
+            cb_norm2 = (cb * cb).sum(dim=1)  # (K,)
+
+        # Precompute ||a||^2 for all queries
+        flat_norm2 = (flat * flat).sum(dim=1, keepdim=True)  # (N,1)
+
+        # Prepare (D,K) for GEMM; contiguous helps
+        cb_t = cb.t().contiguous()  # (D, K)
+
+        chunk = max(1, int(self.nn_chunk_size))
+        idx_out = torch.empty((flat.shape[0],), dtype=torch.long, device=flat.device)
+
+        # Chunk over N to avoid allocating full (N,K)
+        for start in range(0, flat.shape[0], chunk):
+            end = min(start + chunk, flat.shape[0])
+            a = flat[start:end]              # (c,D)
+            a_norm2 = flat_norm2[start:end]  # (c,1)
+
+            # (c,K) dot products
+            prod = a @ cb_t
+
+            # (c,K) squared distances
+            dist2 = a_norm2 + cb_norm2.unsqueeze(0) - 2.0 * prod
+
+            idx_out[start:end] = torch.argmin(dist2, dim=1)
+
+        return idx_out.reshape(B, T, S)
 
     # -------------------------
     # Initialization
@@ -201,8 +278,10 @@ class DiscreteCEMPlanner(BasePlanner):
         if T <= 0:
             return pi
 
-        idx = self._nearest_code_indices_splitwise(actions[:, :T], codebook, S=S, D=D)  # (B,T,S)
-        onehot = F.one_hot(idx, num_classes=K).to(torch.float32)                        # (B,T,S,K)
+        # Warm-start: nearest code indices per split
+        with torch.no_grad():
+            idx = self._nearest_code_indices_splitwise(actions[:, :T], codebook, S=S, D=D)  # (B,T,S)
+            onehot = F.one_hot(idx, num_classes=K).to(torch.float32)                        # (B,T,S,K)
 
         eps = float(self.init_smoothing)
         pi[:, :T] = onehot * (1.0 - eps) + eps / K

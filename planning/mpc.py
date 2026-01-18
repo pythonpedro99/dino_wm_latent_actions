@@ -62,7 +62,7 @@ class MPCPlanner(BasePlanner):
 
     def _apply_success_mask(self, actions):
         device = actions.device
-        mask = torch.tensor(self.is_success).bool()
+        mask = torch.as_tensor(self.is_success, device=actions.device, dtype=torch.bool)
         actions[mask] = 0
         if self.plan_action_type == "raw":
             masked_actions = rearrange(

@@ -75,10 +75,10 @@ def build_plan_cfg_dicts(
     ckpt_base_path="",
     model_name="",
     model_epoch="final",
-    planner=["gd", "cem"],
+    planner=None,
     goal_source=["dset"],
-    goal_H=[1, 5, 10],
-    alpha=[0, 0.1, 1],
+    goal_H=None,
+    alpha=None,
 ):
     """
     Return a list of plan overrides, for model_path, add a key in the dict {"model_path": model_path}.
@@ -135,7 +135,7 @@ class PlanWorkspace:
         self.device = next(wm.parameters()).device
 
         # have different seeds for each planning instances
-        self.eval_seed = [cfg_dict["seed"] * n + 1 for n in range(cfg_dict["n_evals"])]
+        self.eval_seed = [cfg_dict["seed"] + n for n in range(cfg_dict["n_evals"])]
         print("eval_seed: ", self.eval_seed)
         self.n_evals = cfg_dict["n_evals"]
         self.goal_source = cfg_dict["goal_source"]
@@ -278,13 +278,13 @@ class PlanWorkspace:
         env_info = []
 
         # Check if any trajectory is long enough
-        valid_traj = [
-            self.dset[i][0]["visual"].shape[0]
-            for i in range(len(self.dset))
-            if self.dset[i][0]["visual"].shape[0] >= traj_len
-        ]
-        if len(valid_traj) == 0:
-            raise ValueError("No trajectory in the dataset is long enough.")
+        # valid_traj = [
+        #     self.dset[i][0]["visual"].shape[0]
+        #     for i in range(len(self.dset))
+        #     if self.dset[i][0]["visual"].shape[0] >= traj_len
+        # ]
+        # if len(valid_traj) == 0:
+        #     raise ValueError("No trajectory in the dataset is long enough.")
 
         # sample init_states from dset
         for i in range(self.n_evals):
@@ -293,7 +293,8 @@ class PlanWorkspace:
                 traj_id = random.randint(0, len(self.dset) - 1)
                 obs, act, state, e_info = self.dset[traj_id]
                 max_offset = obs["visual"].shape[0] - traj_len
-            state = state.numpy()
+            if isinstance(state, torch.Tensor):
+                state = state.detach().cpu().numpy()
             offset = random.randint(0, max_offset)
             obs = {
                 key: arr[offset : offset + traj_len]
@@ -361,85 +362,90 @@ class PlanWorkspace:
         return logs
 
 
-def load_ckpt(snapshot_path: Path, device, required_keys: set[str]):
+def load_ckpt(snapshot_path: Path, required_keys: Iterable[str]) -> dict[str, Any]:
     """
-    Loads ONLY the objects listed in required_keys from the checkpoint payload (if present),
-    plus mandatory metadata 'epoch'. No ALL_MODEL_KEYS filtering.
+    Loads ONLY the entries listed in required_keys from the checkpoint payload (if present),
+    plus mandatory metadata 'epoch'.
+
+    Assumes checkpoints store state_dicts / plain Python containers (recommended):
+      - Loads on CPU for robustness.
+      - Does not call .to(device) on payload entries (state_dicts are dicts).
     """
+    snapshot_path = Path(snapshot_path)
     with snapshot_path.open("rb") as f:
-        payload = torch.load(f, map_location=device)
+        payload = torch.load(f, map_location="cpu")
 
     if "epoch" not in payload:
         raise KeyError(f"Checkpoint missing 'epoch' field: {snapshot_path}")
 
-    result = {"epoch": payload["epoch"]}
-    loaded_keys = []
+    required_keys_set = set(required_keys)
 
-    for k in required_keys:
+    result: dict[str, Any] = {"epoch": int(payload["epoch"])}
+    loaded_keys: list[str] = []
+
+    for k in required_keys_set:
         if k in payload:
-            v = payload[k]
-            if hasattr(v, "to"):
-                v = v.to(device)
-            result[k] = v
+            result[k] = payload[k]
             loaded_keys.append(k)
 
     result["_loaded_keys"] = sorted(loaded_keys)
+    result["_missing_keys"] = sorted(required_keys_set - set(loaded_keys))
     return result
 
 
 def load_model(model_ckpt: Path, model_cfg, cfg_dict: dict, num_action_repeat: int, required_keys: set[str], device):
-    """
-    Strict loading: checkpoint must contain all required_keys.
-    action_encoder is loaded (if required/present) but returned separately and NOT passed into the model.
-    Returns:
-      model, action_decoder
-    """
     if not model_ckpt.exists():
         raise FileNotFoundError(f"Strict loading requires a checkpoint, but it does not exist: {model_ckpt}")
 
-    result = load_ckpt(model_ckpt, device=device, required_keys=required_keys)
+    result = load_ckpt(model_ckpt, required_keys=required_keys)
     print(f"Resuming from epoch {result['epoch']}: {model_ckpt}")
 
-    missing = sorted(list(required_keys - set(result.keys())))
-    if missing:
-        present = sorted([k for k in result.keys() if k not in {"epoch", "_loaded_keys"}])
+    if result["_missing_keys"]:
+        present = sorted([k for k in result.keys() if k not in {"epoch", "_loaded_keys", "_missing_keys"}])
         raise ValueError(
             "Strict loading failed: checkpoint does not contain all required components.\n"
             f"  checkpoint: {model_ckpt}\n"
-            f"  missing: {missing}\n"
+            f"  missing: {result['_missing_keys']}\n"
             f"  present: {present}\n"
         )
+
     action_decoder = result.get("action_decoder", None)
 
+    # Instantiate model from config only
     model = hydra.utils.instantiate(
-        model_cfg.model,                 # this should resolve to VWorldModel via Hydra
-        image_size=model_cfg.image_size,
-        num_hist= 1,                      # we enforce num_hist to be 1 for planning and advise training to match that
-        num_pred=model_cfg.num_pred,
-        encoder=result.get("encoder"),
-        decoder=result.get("decoder", None),
-        predictor=result.get("predictor"),
+        model_cfg.model,
+        image_size=model_cfg.dataset.image_size,
+        num_hist=1,
+        num_pred=model_cfg.model.num_pred,
         codebook_splits=model_cfg.model.codebook_splits,
         codebook_dim=model_cfg.model.codebook_dim,
-        action_dim=model_cfg.action_emb_dim,
-        concat_dim=model_cfg.concat_dim,
+        action_dim=model_cfg.model.action_emb_dim,
+        concat_dim=model_cfg.model.concat_dim,
         latent_action_dim=model_cfg.model.latent_action_dim,
         num_action_repeat=num_action_repeat,
-        train_encoder=model_cfg.train_encoder,
-        train_predictor=model_cfg.train_predictor,
-        train_decoder=model_cfg.train_decoder,
-        train_lam=model_cfg.train_lam,
+        train_encoder=model_cfg.model.train_encoder,
+        train_predictor=model_cfg.model.train_predictor,
+        train_decoder=model_cfg.model.train_decoder,
+        train_lam=model_cfg.model.train_lam,
         use_action_encoder=cfg_dict["use_action_encoder"],
         use_lam=cfg_dict["use_lam"],
         use_vq=cfg_dict["use_vq"],
         plan_action_type=cfg_dict.get("plan_action_type"),
-        action_encoder=result.get("action_encoder", None),
-        latent_action_model=result.get("latent_action_model", None),
-        vq_model=result.get("vq_model", None),
-        latent_action_down=result.get("latent_action_down", None),
     )
+
+    # Load weights
+    missing_keys, unexpected_keys = model.load_state_dict(result["model"], strict=False)
+    if missing_keys or unexpected_keys:
+        raise RuntimeError(
+            "State_dict mismatch while loading model.\n"
+            f"  missing_keys: {missing_keys}\n"
+            f"  unexpected_keys: {unexpected_keys}\n"
+        )
+
     model.to(device)
+    model.eval()
     return model, action_decoder
+
 
 
 class DummyWandbRun:
@@ -475,18 +481,11 @@ def planning_main(cfg_dict):
     with open(os.path.join(model_path, "hydra.yaml"), "r") as f:
         model_cfg = OmegaConf.load(f)
 
-    required_keys = {"encoder","predictor"}
+    required_keys = {"model"}
     plan_action_type = cfg_dict["plan_action_type"]
     use_action_encoder = cfg_dict["use_action_encoder"]
 
-    if use_action_encoder and plan_action_type == "raw":
-        required_keys.add("action_encoder")
-
-    if not use_action_encoder and plan_action_type in {"discrete"}:
-        required_keys.add("vq_model")
-        required_keys.add("action_decoder")
-
-    if not use_action_encoder and plan_action_type == "latent":
+    if (not use_action_encoder) and plan_action_type in {"latent", "discrete"}:
         required_keys.add("action_decoder")
 
     seed(cfg_dict["seed"])

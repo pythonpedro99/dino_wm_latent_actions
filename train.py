@@ -506,27 +506,27 @@ class Trainer:
         # build composite model (PLAIN)
         # -------------------------
         model_kwargs = dict(
-            image_size=self.cfg.img_size,
-            num_hist=self.cfg.num_hist,
-            num_pred=self.cfg.num_pred,
-            encoder=self.encoder,
-            decoder=self.decoder,
-            predictor=self.predictor,
-            codebook_splits=self.cfg.model.codebook_splits,
-            codebook_dim=self.cfg.model.codebook_dim,
-            action_dim=self.datasets["train"].action_dim,
-            concat_dim=self.cfg.concat_dim,
-            latent_action_dim=self.cfg.model.latent_action_dim,
-            num_action_repeat=self.cfg.num_action_repeat,
-            train_encoder=self.train_encoder,
-            train_predictor=self.train_predictor,
-            train_decoder=self.train_decoder,
-            train_lam=self.train_lam,
-            use_action_encoder=self.cfg.model.use_action_encoder,
-            use_lam=self.cfg.model.use_lam,
-            use_vq=self.cfg.model.use_vq,
-            plan_action_type=self.plan_action_type,
-        )
+        image_size=self.cfg.dataset.img_size,
+        num_hist=self.cfg.model.num_hist,
+        num_pred=self.cfg.model.num_pred,
+        encoder=self.encoder,
+        decoder=self.decoder,
+        predictor=self.predictor,
+        codebook_splits=self.cfg.model.codebook_splits,
+        codebook_dim=self.cfg.model.codebook_dim,
+        action_dim=self.datasets["train"].action_dim,
+        concat_dim=self.cfg.model.concat_dim,
+        latent_action_dim=self.cfg.model.latent_action_dim,
+        num_action_repeat=self.cfg.model.num_action_repeat,
+        train_encoder=self.train_encoder,
+        train_predictor=self.train_predictor,
+        train_decoder=self.train_decoder,
+        train_lam=self.train_lam,
+        use_action_encoder=self.cfg.model.use_action_encoder,
+        use_lam=self.cfg.model.use_lam,
+        use_vq=self.cfg.model.use_vq,
+        plan_action_type=self.cfg.model.plan_action_type,
+    )
 
         if self.action_encoder is not None:
             model_kwargs["action_encoder"] = self.action_encoder
