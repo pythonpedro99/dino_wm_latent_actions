@@ -60,10 +60,13 @@ class VWorldModel(nn.Module):
             raise ValueError("use_action_encoder=True but action_encoder is None")
 
         if self.use_lam:
-            if self.latent_action_model is None or self.latent_action_down is None:
-                raise ValueError("use_lam=True but latent_action_model or latent_action_down is None")
             if self.use_vq and self.vq_model is None:
                 raise ValueError("use_vq=True but vq_model is None")
+            if self.plan_action_type == "raw":
+                if self.latent_action_model is None or self.latent_action_down is None:
+                    raise ValueError(
+                        "use_lam=True with plan_action_type='raw' requires latent_action_model and latent_action_down"
+                    )
 
         self.num_hist = num_hist
         self.num_pred = num_pred
