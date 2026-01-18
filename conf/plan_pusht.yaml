@@ -31,10 +31,10 @@ n_evals: 50
 goal_source: 'dset'
 goal_H: 5 
 n_plot_samples: 10
-plan_action_type: "raw"  # "raw" or "latent" or "discrete" raw = baseline always run with use_action_encoder=True
+plan_action_type: "raw"  # "raw" or "latent" or "discrete" | raw = baseline, always run with use_action_encoder=True
 use_action_encoder: True   # True for baseline
-use_lam: False   # false for raw true for discrete and latent
-use_vq: False   #  false for raw true for discrete
+use_lam: False   # false for raw, true for discrete and latent
+use_vq: False   #  false for raw, true for discrete
 
 debug_dset_init: False
 

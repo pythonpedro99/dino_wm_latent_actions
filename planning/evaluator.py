@@ -111,6 +111,7 @@ class PlanEvaluator:  # evaluator for planning
             i_z_obses, _ = self.wm.rollout(
                 obs_0=trans_obs_0,
                 act=actions,
+                num_hist=self.wm.num_hist
             )
         i_final_z_obs = self._get_trajdict_last(i_z_obses, action_len + 1)
 
@@ -123,14 +124,14 @@ class PlanEvaluator:  # evaluator for planning
                 )
             with torch.no_grad():
                 env_actions = self.action_decoder(env_actions)
-                env_actions = rearrange(env_actions, "b t (f d) -> b (t f) d", f=self.frameskip)
+                exec_actions = rearrange(env_actions, "b t (f d) -> b (t f) d", f=self.frameskip)
                 #env_actions = self.preprocessor.denormalize_actions(env_actions) #TODO implment decoder aliged denomrlaization
         else:
             exec_actions = rearrange(
             env_actions.detach().cpu(), "b t (f d) -> b (t f) d", f=self.frameskip
              )
             exec_actions = self.preprocessor.denormalize_actions(exec_actions).numpy()
-            
+
         e_obses, e_states = self.env.rollout(self.seed, self.state_0, exec_actions)
         e_visuals = e_obses["visual"]
         e_final_obs = self._get_trajdict_last(e_obses, action_len * self.frameskip + 1)

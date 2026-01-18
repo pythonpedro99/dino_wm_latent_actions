@@ -110,6 +110,7 @@ class CEMPlanner(BasePlanner):
                     i_z_obses, i_zs = self.wm.rollout(
                         obs_0=cur_trans_obs_0,
                         act=action,
+                        num_hist=self.wm.num_hist
                     )
 
                 loss = self.objective_fn(i_z_obses, cur_z_obs_g)
