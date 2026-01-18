@@ -54,7 +54,7 @@ class PushTDataset(TrajDataset):
 
         # ---- load actions ----
         if relative:
-            self.actions = torch.load(self.data_path / "rel_actions_discretized_kmeans_k9.pth")
+            self.actions = torch.load(self.data_path / "rel_actions.pth")
         else:
             self.actions = torch.load(self.data_path / "abs_actions.pth")
         self.actions = self.actions.float() / float(action_scale)
