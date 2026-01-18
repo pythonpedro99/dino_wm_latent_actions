@@ -257,68 +257,99 @@ class Trainer:
             self.train_action_encoder, self.train_lam
         )
 
-        self._keys_to_save = ["epoch"]
-
-        if self.train_encoder:
-            self._keys_to_save += ["encoder", "encoder_optimizer"]
-
-        if self.cfg.model.has_predictor and self.train_predictor:
-            self._keys_to_save += ["predictor", "predictor_optimizer"]
-
-        if self.cfg.model.has_decoder and self.train_decoder:
-            self._keys_to_save += ["decoder", "decoder_optimizer"]
-
-        if self.use_action_encoder:
-            self._keys_to_save += ["action_encoder"]
-            if self.train_action_encoder:
-                self._keys_to_save += ["action_encoder_optimizer"]
-
-        if self.use_lam:
-            self._keys_to_save += ["latent_action_model", "vq_model", "latent_action_down"]
-            if self.train_lam:
-                self._keys_to_save += ["latent_optimizer"]
-
+    
         self.init_models()
         self.init_optimizers()
 
+        ckpt_dir = Path(self.cfg.saved_folder) / "checkpoints"
+        model_ckpt = ckpt_dir / "model_latest.pth"
+        if model_ckpt.exists():
+            self.load_ckpt(model_ckpt)
+            log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
+
+
         self.epoch_log = OrderedDict()
-        
 
 
     def save_ckpt(self):
         self.accelerator.wait_for_everyone()
+
+        ckpt_dir = Path(self.cfg.saved_folder) / "checkpoints"
         if self.accelerator.is_main_process:
-            if not os.path.exists("checkpoints"):
-                os.makedirs("checkpoints")
-            ckpt = {}
-            for k in self._keys_to_save:
-                if hasattr(self.__dict__[k], "module"):
-                    ckpt[k] = self.accelerator.unwrap_model(self.__dict__[k])
-                else:
-                    ckpt[k] = self.__dict__[k]
-            torch.save(ckpt, "checkpoints/model_latest.pth")
-            torch.save(ckpt, f"checkpoints/model_{self.epoch}.pth")
-            log.info("Saved model to {}".format(os.getcwd()))
-            ckpt_path = os.path.join(os.getcwd(), f"checkpoints/model_{self.epoch}.pth")
+            ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+
+        ckpt = {
+            "epoch": int(getattr(self, "epoch", 0)),
+            "global_step": int(getattr(self, "global_step", 0)),
+            "model": unwrapped_model.state_dict(),
+
+            "opt_encoder": self.encoder_optimizer.state_dict() if getattr(self, "encoder_optimizer", None) else None,
+            "opt_predictor": self.predictor_optimizer.state_dict() if getattr(self, "predictor_optimizer", None) else None,
+            "opt_decoder": self.decoder_optimizer.state_dict() if getattr(self, "decoder_optimizer", None) else None,
+            "opt_action_encoder": self.action_encoder_optimizer.state_dict() if getattr(self, "action_encoder_optimizer", None) else None,
+            "opt_lam": self.latent_optimizer.state_dict() if getattr(self, "latent_optimizer", None) else None,
+        }
+
+        if self.accelerator.is_main_process:
+            latest_path = ckpt_dir / "model_latest.pth"
+            epoch_path = ckpt_dir / f"model_{self.epoch}.pth"
+
+            self.accelerator.save(ckpt, str(latest_path))
+            self.accelerator.save(ckpt, str(epoch_path))
+
+            log.info("Saved checkpoint(s) to %s", str(ckpt_dir.resolve()))
+            ckpt_path = str(epoch_path.resolve())
         else:
             ckpt_path = None
+
+        self.accelerator.wait_for_everyone()
+
         model_name = self.cfg["saved_folder"].split("outputs/")[-1]
         model_epoch = self.epoch
         return ckpt_path, model_name, model_epoch
 
-    def load_ckpt(self, filename="model_latest.pth"):
-        ckpt = torch.load(filename)
-        for k, v in ckpt.items():
-            self.__dict__[k] = v
-        not_in_ckpt = set(self._keys_to_save) - set(ckpt.keys())
-        if len(not_in_ckpt):
-            log.warning("Keys not found in ckpt: %s", not_in_ckpt)
+
+    def load_ckpt(self, filename, strict: bool = True):
+        filename = str(filename)
+
+        ckpt = torch.load(filename, map_location="cpu")
+
+        if getattr(self, "model", None) is None:
+            raise RuntimeError("self.model is None. Call init_models() before load_ckpt().")
+
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+
+        res = unwrapped_model.load_state_dict(ckpt["model"], strict=strict)
+        if hasattr(res, "missing_keys") and self.accelerator.is_main_process:
+            if res.missing_keys or res.unexpected_keys:
+                log.warning(
+                    "Checkpoint load (strict=%s): missing=%s unexpected=%s",
+                    strict, res.missing_keys, res.unexpected_keys
+                )
+
+        self.epoch = int(ckpt.get("epoch", 0))
+        self.global_step = int(ckpt.get("global_step", 0))
+
+        # Load optimizer states if optimizers exist (must be created already)
+        if getattr(self, "encoder_optimizer", None) and ckpt.get("opt_encoder") is not None:
+            self.encoder_optimizer.load_state_dict(ckpt["opt_encoder"])
+        if getattr(self, "predictor_optimizer", None) and ckpt.get("opt_predictor") is not None:
+            self.predictor_optimizer.load_state_dict(ckpt["opt_predictor"])
+        if getattr(self, "decoder_optimizer", None) and ckpt.get("opt_decoder") is not None:
+            self.decoder_optimizer.load_state_dict(ckpt["opt_decoder"])
+        if getattr(self, "action_encoder_optimizer", None) and ckpt.get("opt_action_encoder") is not None:
+            self.action_encoder_optimizer.load_state_dict(ckpt["opt_action_encoder"])
+        if getattr(self, "latent_optimizer", None) and ckpt.get("opt_lam") is not None:
+            self.latent_optimizer.load_state_dict(ckpt["opt_lam"])
+
+        self.accelerator.wait_for_everyone()
+        return ckpt
+
+
 
     def init_models(self):
-        model_ckpt = Path(self.cfg.saved_folder) / "checkpoints" / "model_latest.pth"
-        if model_ckpt.exists():
-            self.load_ckpt(model_ckpt)
-            log.info(f"Resuming from epoch {self.epoch}: {model_ckpt}")
 
         # -------------------------
         # initialize encoder (PLAIN)
@@ -621,8 +652,7 @@ class Trainer:
             )
             self.monitor_thread.start()
 
-        init_epoch = self.epoch + 1  # epoch starts from 1
-        for epoch in range(init_epoch, init_epoch + self.total_epochs):
+        for epoch in range(self.epoch + 1, self.total_epochs + 1):
             self.epoch = epoch
             self.accelerator.wait_for_everyone()
             self.train()
@@ -904,13 +934,14 @@ class Trainer:
 
     def val(self):
         self.model.eval()
+        self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process and len(self.train_traj_dset) > 0 and self.cfg.model.has_predictor:
             with torch.no_grad():
-                val_rollout_logs = self.openloop_rollout(self.val_traj_dset, mode="val")
-                val_rollout_logs = {
-                    f"val_{k}": [v] for k, v in val_rollout_logs.items()
-                }
-                self.logs_update(val_rollout_logs)
+                logs = self.openloop_rollout(self.val_traj_dset, mode="val")
+                logs = {f"val_{k}": [float(v.detach().mean().cpu()) if torch.is_tensor(v) else float(v)]
+                        for k, v in logs.items()}
+                self.logs_update(logs)
+
 
         self.accelerator.wait_for_everyone()
         with torch.no_grad():
@@ -923,7 +954,7 @@ class Trainer:
                 )
             ):
                 obs, act, _ = data
-                plot = i == 0
+                plot = False  # disable plotting during val for speed
                 z_out, visual_out, visual_reconstructed, loss, loss_components, encode_output = self.model(
                     obs, act
                 )
@@ -1002,7 +1033,6 @@ class Trainer:
         plotting_dir = f"rollout_plots/e{self.epoch}_rollout"
         if self.accelerator.is_main_process:
             os.makedirs(plotting_dir, exist_ok=True)
-        self.accelerator.wait_for_everyone()
         logs = {}
 
         num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
