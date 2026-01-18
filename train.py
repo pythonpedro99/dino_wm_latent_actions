@@ -773,10 +773,19 @@ class Trainer:
                     else:
                         _, act_base_h = self.model.separate_emb(z_src)
 
+                   
                     # ----------------------------
-                    # swap + shuffle checks (streak-based)
+                    # swap + shuffle checks (streak-based over consecutive batches after trigger)
+                    # log ONLY after the full window
                     # ----------------------------
-                    if self.global_step % self.swap_check_every_n_steps == 0:
+                    m = self.global_step % self.swap_check_every_n_steps
+
+                    # reset streak at the start of each check-window so "streak" means consecutive batches
+                    if m == 0:
+                        self._swap_bad_streak = 0
+
+                    # run for the first `swap_bad_streak_to_flag` batches after each trigger
+                    if m < self.swap_bad_streak_to_flag:
                         swap_s = float(self.metric_z_swap_score(z_src, z_tgt, act_base_h))
                         delta, mse_base, mse_shuf = self.metric_action_shuffle_delta(z_src, z_tgt, act_base_h)
                         delta = float(delta); mse_base = float(mse_base); mse_shuf = float(mse_shuf)
@@ -785,16 +794,19 @@ class Trainer:
                         self._swap_bad_streak = (self._swap_bad_streak + 1) if swap_bad else 0
                         swap_flagged = (self._swap_bad_streak >= self.swap_bad_streak_to_flag)
 
-                        self.jsonl.log({
-                            "step": int(self.global_step),
-                            "swap_s": swap_s,
-                            "shuffle_delta": delta,
-                            "mse_base": mse_base,
-                            "mse_shuf": mse_shuf,
-                            "swap_bad": bool(swap_bad),
-                            "swap_bad_streak": int(self._swap_bad_streak),
-                            "swap_flagged": bool(swap_flagged),
-                        })
+                        # log only at the end of the window
+                        if m == (self.swap_bad_streak_to_flag - 1):
+                            self.jsonl.log({
+                                "step": int(self.global_step),
+                                "swap_s": swap_s,
+                                "shuffle_delta": delta,
+                                "mse_base": mse_base,
+                                "mse_shuf": mse_shuf,
+                                "swap_bad": bool(swap_bad),
+                                "swap_bad_streak": int(self._swap_bad_streak),
+                                "swap_flagged": bool(swap_flagged),
+                            })
+
 
                     # ----------------------------
                     # VQ usage checks (windowed)
