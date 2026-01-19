@@ -21,6 +21,8 @@ from custom_resolvers import replace_slash
 from preprocessor import Preprocessor
 from planning.evaluator import PlanEvaluator
 from utils import cfg_to_dict, seed
+from typing import Any, Iterable
+
 
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
@@ -393,15 +395,36 @@ def load_ckpt(snapshot_path: Path, required_keys: Iterable[str]) -> dict[str, An
     return result
 
 
-def load_model(model_ckpt: Path, model_cfg, cfg_dict: dict, num_action_repeat: int, required_keys: set[str], device):
-    if not model_ckpt.exists():
-        raise FileNotFoundError(f"Strict loading requires a checkpoint, but it does not exist: {model_ckpt}")
+def load_model(
+    model_ckpt: Path,
+    model_cfg,
+    cfg_dict: dict,
+    num_action_repeat: int,
+    required_keys: set[str],
+    device,
+):
+    """
+    Strictly load a VWorldModel checkpoint by instantiating the full composite
+    module graph (encoder/predictor/decoder/action_encoder/LAM/VQ/down) exactly
+    as training does, then loading with strict=True.
 
+    Returns:
+      (model, action_decoder)
+    """
+    model_ckpt = Path(model_ckpt)
+    if not model_ckpt.exists():
+        raise FileNotFoundError(
+            f"Strict loading requires a checkpoint, but it does not exist: {model_ckpt}"
+        )
+
+    # 1) Load checkpoint first
     result = load_ckpt(model_ckpt, required_keys=required_keys)
     print(f"Resuming from epoch {result['epoch']}: {model_ckpt}")
 
     if result["_missing_keys"]:
-        present = sorted([k for k in result.keys() if k not in {"epoch", "_loaded_keys", "_missing_keys"}])
+        present = sorted(
+            [k for k in result.keys() if k not in {"epoch", "_loaded_keys", "_missing_keys"}]
+        )
         raise ValueError(
             "Strict loading failed: checkpoint does not contain all required components.\n"
             f"  checkpoint: {model_ckpt}\n"
@@ -411,9 +434,71 @@ def load_model(model_ckpt: Path, model_cfg, cfg_dict: dict, num_action_repeat: i
 
     action_decoder = result.get("action_decoder", None)
 
-    # Instantiate model from config only
+    # Defensive reads (avoid KeyError / make intent explicit)
+    use_action_encoder = bool(cfg_dict.get("use_action_encoder", False))
+    use_lam = bool(cfg_dict.get("use_lam", False))
+    use_vq = bool(cfg_dict.get("use_vq", False))
+    plan_action_type = cfg_dict.get("plan_action_type", None)
+
+    # 2) Build submodules exactly as training did
+    # NOTE: The exact kwargs here depend on your Hydra configs.
+    # This version passes only what is clearly available in your snippet.
+    encoder = hydra.utils.instantiate(
+        model_cfg.encoder,
+        image_size=model_cfg.dataset.image_size,
+    )
+
+    predictor = hydra.utils.instantiate(
+        model_cfg.predictor,
+    )
+
+    # Decoder can be None depending on how your config is authored.
+    # If model_cfg.decoder is a config node that can be null, handle it.
+    decoder = hydra.utils.instantiate(model_cfg.decoder) if model_cfg.decoder is not None else None
+
+    action_encoder = None
+    if use_action_encoder:
+        action_encoder_cfg = getattr(model_cfg, "action_encoder", None)
+        if action_encoder_cfg is None:
+            raise ValueError(
+                "use_action_encoder=True but model_cfg.action_encoder is not configured."
+            )
+        action_encoder = hydra.utils.instantiate(action_encoder_cfg)
+
+    latent_action_model = None
+    vq_model = None
+    latent_action_down = None
+    if use_lam:
+        lam_cfg = getattr(model_cfg, "latent_action_model", None)
+        if lam_cfg is None:
+            raise ValueError("use_lam=True but model_cfg.latent_action_model is not configured.")
+        latent_action_model = hydra.utils.instantiate(lam_cfg)
+
+        if use_vq:
+            vq_cfg = getattr(model_cfg, "vq_model", None)
+            if vq_cfg is None:
+                raise ValueError("use_vq=True but model_cfg.vq_model is not configured.")
+            vq_model = hydra.utils.instantiate(vq_cfg)
+
+        if plan_action_type == "raw":
+            down_cfg = getattr(model_cfg, "latent_action_down", None)
+            if down_cfg is None:
+                raise ValueError(
+                    "plan_action_type='raw' requires model_cfg.latent_action_down to be configured."
+                )
+            latent_action_down = hydra.utils.instantiate(down_cfg)
+
+    # 3) Instantiate VWorldModel passing module objects (as in training)
     model = hydra.utils.instantiate(
         model_cfg.model,
+        encoder=encoder,
+        predictor=predictor,
+        decoder=decoder,
+        action_encoder=action_encoder,
+        latent_action_model=latent_action_model,
+        vq_model=vq_model,
+        latent_action_down=latent_action_down,
+        # scalar args (same as before)
         image_size=model_cfg.dataset.image_size,
         num_hist=1,
         num_pred=model_cfg.model.num_pred,
@@ -427,24 +512,19 @@ def load_model(model_ckpt: Path, model_cfg, cfg_dict: dict, num_action_repeat: i
         train_predictor=model_cfg.model.train_predictor,
         train_decoder=model_cfg.model.train_decoder,
         train_lam=model_cfg.model.train_lam,
-        use_action_encoder=cfg_dict["use_action_encoder"],
-        use_lam=cfg_dict["use_lam"],
-        use_vq=cfg_dict["use_vq"],
-        plan_action_type=cfg_dict.get("plan_action_type"),
+        use_action_encoder=use_action_encoder,
+        use_lam=use_lam,
+        use_vq=use_vq,
+        plan_action_type=plan_action_type,
     )
 
-    # Load weights
-    missing_keys, unexpected_keys = model.load_state_dict(result["model"], strict=False)
-    if missing_keys or unexpected_keys:
-        raise RuntimeError(
-            "State_dict mismatch while loading model.\n"
-            f"  missing_keys: {missing_keys}\n"
-            f"  unexpected_keys: {unexpected_keys}\n"
-        )
+    # 4) Strict load
+    model.load_state_dict(result["model"], strict=True)
 
     model.to(device)
     model.eval()
     return model, action_decoder
+
 
 
 

@@ -162,9 +162,9 @@ class Trainer:
         log.info(f"Loading dataset from {self.cfg.env.dataset.data_path} ...")
         self.datasets, traj_dsets = hydra.utils.call(
             self.cfg.env.dataset,
-            num_hist=self.cfg.num_hist,
-            num_pred=self.cfg.num_pred,
-            frameskip=self.cfg.frameskip,
+            num_hist=self.cfg.model.num_hist,
+            num_pred=self.cfg.model.num_pred,
+            frameskip=self.cfg.dataset.frameskip,
         )
 
         self.train_traj_dset = traj_dsets["train"]
