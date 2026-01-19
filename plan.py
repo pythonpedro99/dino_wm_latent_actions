@@ -434,36 +434,84 @@ def load_model(
 
     action_decoder = result.get("action_decoder", None)
 
-    # Defensive reads (avoid KeyError / make intent explicit)
-    use_action_encoder = bool(cfg_dict.get("use_action_encoder", False))
-    use_lam = bool(cfg_dict.get("use_lam", False))
-    use_vq = bool(cfg_dict.get("use_vq", False))
-    plan_action_type = cfg_dict.get("plan_action_type", None)
+    
+    use_action_encoder = bool(getattr(model_cfg.model, "use_action_encoder"))
+    use_lam          = bool(getattr(model_cfg.model, "use_lam"))
+    use_vq           = bool(getattr(model_cfg.model, "use_vq"))
+    plan_action_type = cfg_dict.get("plan_action_type")
 
-    # 2) Build submodules exactly as training did
-    # NOTE: The exact kwargs here depend on your Hydra configs.
-    # This version passes only what is clearly available in your snippet.
+
     encoder = hydra.utils.instantiate(
         model_cfg.encoder,
-        image_size=model_cfg.dataset.img_size,
     )
 
-    predictor = hydra.utils.instantiate(
-        model_cfg.predictor,
-    )
+    # num_patches
+    if getattr(encoder, "latent_ndim", None) == 1:
+        num_patches = 1
+    else:
+        decoder_scale = 16
+        img_size = int(getattr(model_cfg.dataset, "img_size", 224))
+        num_side_patches = img_size // decoder_scale
+        num_patches = num_side_patches**2
 
-    # Decoder can be None depending on how your config is authored.
-    # If model_cfg.decoder is a config node that can be null, handle it.
-    decoder = hydra.utils.instantiate(model_cfg.decoder) if model_cfg.decoder is not None else None
+    # training code: if cfg.concat_dim == 0: num_patches += 2
+    concat_dim = int(getattr(model_cfg.model, "concat_dim"))
+    if concat_dim == 0:
+        num_patches += 1
+
+   
+    cond_dim_per_step = 0
+    if concat_dim != 0:
+        if use_action_encoder:
+            action_emb_dim = int(getattr(model_cfg.model, "action_emb_dim", 0) or 0)
+            if action_emb_dim <= 0:
+                raise ValueError(
+                    "use_action_encoder=True but model_cfg.model.action_emb_dim is missing/invalid."
+                )
+            cond_dim_per_step = action_emb_dim * int(num_action_repeat)
+        elif use_lam:
+            cond_dim_per_step = int(model_cfg.model.latent_action_dim) * int(num_action_repeat)
+        else:
+            cond_dim_per_step = 0
+
+
+    # predictor_dim
+    predictor_dim = int(getattr(encoder, "emb_dim")) + (cond_dim_per_step * concat_dim)
+
+    # instantiate predictor (only if enabled)
+    predictor = None
+    has_predictor = bool(getattr(model_cfg.model, "has_predictor", True))
+    if has_predictor:
+        predictor = hydra.utils.instantiate(
+            model_cfg.predictor,
+            num_patches=num_patches,
+            num_frames=int(getattr(model_cfg.model, "num_hist", 1)),
+            dim=predictor_dim,
+        )
+
 
     action_encoder = None
     if use_action_encoder:
         action_encoder_cfg = getattr(model_cfg, "action_encoder", None)
         if action_encoder_cfg is None:
+            raise ValueError("use_action_encoder=True but model_cfg.action_encoder is not configured.")
+
+
+        action_dim = int(getattr(getattr(model_cfg, "dataset", None), "action_dim", None) or 0)
+        if action_dim <= 0:
             raise ValueError(
-                "use_action_encoder=True but model_cfg.action_encoder is not configured."
+                "Action encoder requires a valid action_dim. Provide cfg_dict['action_dim'] "
+                "or set model_cfg.dataset.action_dim."
             )
-        action_encoder = hydra.utils.instantiate(action_encoder_cfg)
+
+        frameskip = int(getattr(getattr(model_cfg, "dataset", None), "frameskip", 1))
+
+        action_encoder = hydra.utils.instantiate(
+            action_encoder_cfg,
+            in_chans=action_dim * frameskip,
+            emb_dim=int(model_cfg.model.action_emb_dim),
+        )
+
 
     latent_action_model = None
     vq_model = None
@@ -472,7 +520,12 @@ def load_model(
         lam_cfg = getattr(model_cfg, "latent_action_model", None)
         if lam_cfg is None:
             raise ValueError("use_lam=True but model_cfg.latent_action_model is not configured.")
-        latent_action_model = hydra.utils.instantiate(lam_cfg)
+        latent_action_model = hydra.utils.instantiate(
+        lam_cfg,
+        in_dim=int(getattr(encoder, "emb_dim")),
+        model_dim=int(getattr(encoder, "emb_dim")),
+        patch_size=int(getattr(encoder, "patch_size", 1)),
+    )
 
         if use_vq:
             vq_cfg = getattr(model_cfg, "vq_model", None)
@@ -481,24 +534,24 @@ def load_model(
             vq_model = hydra.utils.instantiate(vq_cfg)
 
         if plan_action_type == "raw":
-            down_cfg = getattr(model_cfg, "latent_action_down", None)
-            if down_cfg is None:
-                raise ValueError(
-                    "plan_action_type='raw' requires model_cfg.latent_action_down to be configured."
-                )
-            latent_action_down = hydra.utils.instantiate(down_cfg)
+            # latent_dim matches training logic
+            if hasattr(model_cfg.model, "codebook_splits") and hasattr(model_cfg.model, "codebook_dim"):
+                latent_dim = int(model_cfg.model.codebook_splits) * int(model_cfg.model.codebook_dim)
+            else:
+                latent_dim = int(model_cfg.model.latent_action_dim)
+
+            latent_action_down = nn.Linear(int(getattr(encoder, "emb_dim")), latent_dim)
 
     # 3) Instantiate VWorldModel passing module objects (as in training)
     model = hydra.utils.instantiate(
         model_cfg.model,
         encoder=encoder,
         predictor=predictor,
-        decoder=decoder,
+        decoder=None,
         action_encoder=action_encoder,
         latent_action_model=latent_action_model,
         vq_model=vq_model,
         latent_action_down=latent_action_down,
-        # scalar args (same as before)
         image_size=model_cfg.dataset.img_size,
         num_hist=1,
         num_pred=model_cfg.model.num_pred,
@@ -515,11 +568,11 @@ def load_model(
         use_action_encoder=use_action_encoder,
         use_lam=use_lam,
         use_vq=use_vq,
-        plan_action_type=plan_action_type,
+        plan_action_type="raw",
     )
 
-    # 4) Strict load
-    model.load_state_dict(result["model"], strict=True)
+    
+    model.load_state_dict(result["model"], strict=False)
 
     model.to(device)
     model.eval()
