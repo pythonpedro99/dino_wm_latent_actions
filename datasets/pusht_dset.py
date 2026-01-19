@@ -199,8 +199,21 @@ def load_pusht_slice_train_val(
     )
 
     num_frames = num_hist + num_pred
-    train_slices = TrajSlicerDataset(train_dset, num_frames, frameskip, process_actions)
-    val_slices = TrajSlicerDataset(val_dset, num_frames, frameskip, process_actions)
+    
+    train_slices = TrajSlicerDataset(
+    train_dset,
+    num_frames=num_frames,
+    frameskip=frameskip,
+    process_actions=process_actions,
+    )
+
+    val_slices = TrajSlicerDataset(
+        val_dset,
+        num_frames=num_frames,
+        frameskip=frameskip,
+        process_actions=process_actions,
+    )
+
 
     datasets = {"train": train_slices, "valid": val_slices}
     traj_dset = {"train": train_dset, "valid": val_dset}
