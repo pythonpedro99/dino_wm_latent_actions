@@ -961,7 +961,7 @@ class Trainer:
                     self.dataloaders["valid"],
                     desc=f"Epoch {self.epoch} Valid",
                     disable=not self.accelerator.is_main_process,
-                    position=1,
+                    position=0,
                 )
             ):
                 obs, act, _ = data
