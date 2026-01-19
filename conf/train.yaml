@@ -61,7 +61,7 @@ model:
   use_lam: true
   use_vq: true
   has_predictor: True 
-  has_decoder: False # set this to False for only training a predictor
+  has_decoder: False 
   plan_action_type: raw # always use raw for training 
 
    # training toggles

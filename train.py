@@ -537,7 +537,11 @@ class Trainer:
         if self.latent_action_down is not None:
             model_kwargs["latent_action_down"] = self.latent_action_down
 
-        self.model = hydra.utils.instantiate(self.cfg.model, **model_kwargs)
+        self.model = hydra.utils.instantiate(
+                    {"_target_": self.cfg.model._target_},
+                    **model_kwargs,
+)
+
 
         # -------------------------
         # prepare ONCE (no nested DDP)
