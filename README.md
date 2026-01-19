@@ -4,7 +4,7 @@ DINO-WM with Inverse Dynamics
 
 [Julian Quast](https://gaoyuezhou.github.io/), Technische Universität Berlin
 
-![teaser_figure](assets/trainings_architecture.png)
+![teaser_figure](assets/tranings_architecture.png)
 
 # Contents 
 
