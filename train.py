@@ -370,8 +370,8 @@ class Trainer:
             if self.action_encoder is None:
                 self.action_encoder = hydra.utils.instantiate(
                     self.cfg.action_encoder,
-                    in_chans=self.datasets["train"].action_dim * self.cfg.frameskip,
-                    emb_dim=self.cfg.action_emb_dim,
+                    in_chans=self.datasets["train"].action_dim * self.cfg.dataset.frameskip,
+                    emb_dim=self.cfg.model.action_emb_dim,
                 )
 
             action_emb_dim = self.action_encoder.emb_dim
@@ -394,14 +394,14 @@ class Trainer:
             num_patches = 1
         else:
             decoder_scale = 16
-            num_side_patches = self.cfg.img_size // decoder_scale
+            num_side_patches = self.cfg.dataset.img_size // decoder_scale
             num_patches = num_side_patches**2
 
         if self.cfg.concat_dim == 0:
             num_patches += 2
 
         cond_dim_per_step = 0
-        if self.cfg.concat_dim != 0:
+        if self.cfg.model.concat_dim != 0:
             if self.cfg.model.use_action_encoder:
                 cond_dim_per_step = action_emb_dim * self.cfg.num_action_repeat
             elif self.cfg.model.use_lam:
@@ -409,14 +409,14 @@ class Trainer:
             else:
                 cond_dim_per_step = 0
 
-        predictor_dim = self.encoder.emb_dim + (cond_dim_per_step * self.cfg.concat_dim)
+        predictor_dim = self.encoder.emb_dim + (cond_dim_per_step * self.cfg.model.concat_dim)
 
         if self.cfg.model.has_predictor:
             if self.predictor is None:
                 self.predictor = hydra.utils.instantiate(
                     self.cfg.predictor,
                     num_patches=num_patches,
-                    num_frames=self.cfg.num_hist,
+                    num_frames=self.cfg.model.num_hist,
                     dim=predictor_dim,
                 )
 
@@ -431,8 +431,8 @@ class Trainer:
             predictor_dim,
             self.encoder.emb_dim,
             cond_dim_per_step,
-            self.cfg.concat_dim,
-            self.cfg.num_action_repeat,
+            self.cfg.model.concat_dim,
+            self.cfg.model.num_action_repeat,
             getattr(self.cfg.model, "use_action_encoder", None),
             getattr(self.cfg.model, "use_lam", None),
         )

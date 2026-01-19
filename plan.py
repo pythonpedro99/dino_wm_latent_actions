@@ -445,7 +445,7 @@ def load_model(
     # This version passes only what is clearly available in your snippet.
     encoder = hydra.utils.instantiate(
         model_cfg.encoder,
-        image_size=model_cfg.dataset.image_size,
+        image_size=model_cfg.dataset.img_size,
     )
 
     predictor = hydra.utils.instantiate(
@@ -499,7 +499,7 @@ def load_model(
         vq_model=vq_model,
         latent_action_down=latent_action_down,
         # scalar args (same as before)
-        image_size=model_cfg.dataset.image_size,
+        image_size=model_cfg.dataset.img_size,
         num_hist=1,
         num_pred=model_cfg.model.num_pred,
         codebook_splits=model_cfg.model.codebook_splits,
@@ -571,13 +571,13 @@ def planning_main(cfg_dict):
     seed(cfg_dict["seed"])
     _, dset = hydra.utils.call(
         model_cfg.env.dataset,
-        num_hist=model_cfg.num_hist,
-        num_pred=model_cfg.num_pred,
-        frameskip=model_cfg.frameskip,
+        num_hist=model_cfg.model.num_hist,
+        num_pred=model_cfg.model.num_pred,
+        frameskip=model_cfg.dataset.frameskip,
     )
     dset = dset["valid"]
 
-    num_action_repeat = model_cfg.num_action_repeat
+    num_action_repeat = model_cfg.model.num_action_repeat
     model_ckpt = (
         Path(model_path) / "checkpoints" / f"model_{cfg_dict['model_epoch']}.pth"
     )
@@ -611,7 +611,7 @@ def planning_main(cfg_dict):
         dset=dset,
         env=env,
         env_name=model_cfg.env.name,
-        frameskip=model_cfg.frameskip,
+        frameskip=model_cfg.dataset.frameskip,
         wandb_run=wandb_run,
     )
 
