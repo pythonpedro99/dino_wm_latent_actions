@@ -434,11 +434,11 @@ def load_model(
 
     action_decoder = result.get("action_decoder", None)
 
-    # Defensive reads (avoid KeyError / make intent explicit)
-    use_action_encoder = bool(cfg_dict.get("use_action_encoder", False))
-    use_lam = bool(cfg_dict.get("use_lam", False))
-    use_vq = bool(cfg_dict.get("use_vq", False))
-    plan_action_type = cfg_dict.get("plan_action_type", None)
+    
+    use_action_encoder = bool(getattr(model_cfg.model, "use_action_encoder"))
+    use_lam          = bool(getattr(model_cfg.model, "use_lam"))
+    use_vq           = bool(getattr(model_cfg.model, "use_vq"))
+    plan_action_type = cfg_dict.get("plan_action_type")
 
     # 2) Build submodules exactly as training did
     # NOTE: The exact kwargs here depend on your Hydra configs.
@@ -457,7 +457,7 @@ def load_model(
         num_patches = 1
     else:
         decoder_scale = 16
-        img_size = int(getattr(model_cfg.dataset, 224))
+        img_size = int(getattr(model_cfg.dataset, "img_size", 224))
         num_side_patches = img_size // decoder_scale
         num_patches = num_side_patches**2
 
@@ -466,17 +466,21 @@ def load_model(
     if concat_dim == 0:
         num_patches += 1
 
-    # cond_dim_per_step
+   
     cond_dim_per_step = 0
     if concat_dim != 0:
         if use_action_encoder:
-            # action_emb_dim is action_encoder.emb_dim; fall back to cfg if needed
-            action_emb_dim = int(getattr(action_encoder, "emb_dim", model_cfg.model.action_emb_dim))
+            action_emb_dim = int(getattr(model_cfg.model, "action_emb_dim", 0) or 0)
+            if action_emb_dim <= 0:
+                raise ValueError(
+                    "use_action_encoder=True but model_cfg.model.action_emb_dim is missing/invalid."
+                )
             cond_dim_per_step = action_emb_dim * int(num_action_repeat)
         elif use_lam:
             cond_dim_per_step = int(model_cfg.model.latent_action_dim) * int(num_action_repeat)
         else:
             cond_dim_per_step = 0
+
 
     # predictor_dim
     predictor_dim = int(getattr(encoder, "emb_dim")) + (cond_dim_per_step * concat_dim)

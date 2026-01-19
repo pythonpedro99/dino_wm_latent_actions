@@ -398,7 +398,7 @@ class Trainer:
             num_patches = num_side_patches**2
 
         if self.cfg.concat_dim == 0:
-            num_patches += 2
+            num_patches += 1
 
         cond_dim_per_step = 0
         if self.cfg.model.concat_dim != 0:
