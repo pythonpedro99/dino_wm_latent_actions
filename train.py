@@ -478,14 +478,19 @@ class Trainer:
                     patch_size=getattr(self.encoder, "patch_size", 1),
                 )
 
-            if self.vq_model is None:
+            self.vq_model = None
+
+            if self.cfg.model.use_lam and self.cfg.model.use_vq:
                 self.vq_model = hydra.utils.instantiate(self.cfg.vq_model)
 
-            latent_dim = (
-                self.cfg.model.codebook_splits * self.cfg.model.codebook_dim
-                if hasattr(self.cfg.model, "codebook_splits")
-                else self.cfg.model.latent_action_dim
-            )
+            # latent dimensionality is representation-dependent
+            if self.cfg.model.use_vq:
+                latent_dim = (
+                    self.cfg.model.codebook_splits * self.cfg.model.codebook_dim
+                )
+            else:
+                latent_dim = self.cfg.model.latent_action_dim
+
 
             if self.latent_action_down is None:
                 self.latent_action_down = nn.Linear(self.encoder.emb_dim, latent_dim)
