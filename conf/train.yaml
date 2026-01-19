@@ -35,11 +35,11 @@ hydra:
 training:
   seed: 0
   epochs: 2
-  batch_size: 64                   # should >= nodes * tasks_per_node
+  batch_size: 32                   # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
-  num_workers: 10
+  num_workers: 8
   encoder_lr: 1e-6
   decoder_lr: 3e-4
   predictor_lr: 5e-4
@@ -57,9 +57,9 @@ dataset:
 model:
   _target_: models.visual_world_model.VWorldModel
   # mode selection (XOR with use_action_encoder)
-  use_action_encoder: false
-  use_lam: true
-  use_vq: true
+  use_action_encoder: true
+  use_lam: false
+  use_vq: false
   has_predictor: True 
   has_decoder: False 
   plan_action_type: raw # always use raw for training 
@@ -68,8 +68,8 @@ model:
   train_encoder: false
   train_predictor: true
   train_decoder: false
-  train_action_encoder: false   # explicit, even though use_action_encoder=false
-  train_lam: true               # must be true only if use_lam=true
+  train_action_encoder: true   # explicit, even though use_action_encoder=false
+  train_lam: false               # must be true only if use_lam=true
 
   action_emb_dim: 10 
   num_action_repeat: 1
