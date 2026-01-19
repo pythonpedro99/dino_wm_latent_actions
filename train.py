@@ -1036,13 +1036,13 @@ class Trainer:
             self, dset, num_rollout=10, rand_start_end=True, min_horizon=5, mode="train"
         ):
         np.random.seed(self.cfg.training.seed)
-        min_horizon = min_horizon + self.cfg.num_hist
+        min_horizon = min_horizon + self.cfg.model.num_hist
         plotting_dir = f"rollout_plots/e{self.epoch}_rollout"
         if self.accelerator.is_main_process:
             os.makedirs(plotting_dir, exist_ok=True)
         logs = {}
 
-        num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
+        num_past = [(self.cfg.model.num_hist, ""), (1, "_1framestart")]
 
         for idx in range(num_rollout):
             valid_traj = False
