@@ -432,9 +432,8 @@ def load_model(
             f"  present: {present}\n"
         )
 
-    action_decoder = result.get("action_decoder", None)
+    action_decoder = nn.Identity()    #result.get("action_decoder", None)
 
-    
     use_action_encoder = bool(getattr(model_cfg.model, "use_action_encoder"))
     use_lam          = bool(getattr(model_cfg.model, "use_lam"))
     use_vq           = bool(getattr(model_cfg.model, "use_vq"))
