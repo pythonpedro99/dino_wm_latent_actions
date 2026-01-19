@@ -1047,30 +1047,30 @@ class Trainer:
                 obs, act, _,_ = dset[traj_idx]
                 act = act.to(self.device)
                 if rand_start_end:
-                    if obs["visual"].shape[0] > min_horizon * self.cfg.frameskip + 1:
+                    if obs["visual"].shape[0] > min_horizon * self.cfg.dataset.frameskip + 1:
                         start = np.random.randint(
                             0,
-                            obs["visual"].shape[0] - min_horizon * self.cfg.frameskip - 1,
+                            obs["visual"].shape[0] - min_horizon * self.cfg.dataset.frameskip - 1,
                         )
                     else:
                         start = 0
-                    max_horizon = (obs["visual"].shape[0] - start - 1) // self.cfg.frameskip
+                    max_horizon = (obs["visual"].shape[0] - start - 1) // self.cfg.dataset.frameskip
                     if max_horizon > min_horizon:
                         valid_traj = True
                         horizon = np.random.randint(min_horizon, max_horizon + 1)
                 else:
                     valid_traj = True
                     start = 0
-                    horizon = (obs["visual"].shape[0] - 1) // self.cfg.frameskip
+                    horizon = (obs["visual"].shape[0] - 1) // self.cfg.dataset.frameskip
 
             for k in obs.keys():
                 obs[k] = obs[k][
                     start :
-                    start + horizon * self.cfg.frameskip + 1 :
-                    self.cfg.frameskip
+                    start + horizon * self.cfg.dataset.frameskip + 1 :
+                    self.cfg.dataset.frameskip
                 ]
-            act = act[start : start + horizon * self.cfg.frameskip]
-            act = rearrange(act, "(h f) d -> h (f d)", f=self.cfg.frameskip)
+            act = act[start : start + horizon * self.cfg.dataset.frameskip]
+            act = rearrange(act, "(h f) d -> h (f d)", f=self.cfg.dataset.frameskip)
 
             obs_g = {}
             for k in obs.keys():
