@@ -50,6 +50,7 @@ dependencies:
       # Planning
       - gym==0.23.1
       - submitit
+      - "d4rl==1.1"
 
       # Video IO
       - imageio-ffmpeg
