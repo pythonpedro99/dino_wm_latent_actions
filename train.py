@@ -180,16 +180,20 @@ class Trainer:
                 shuffle=True,
                 generator=g_train,
                 num_workers=self.cfg.env.num_workers,
-                prefetch_factor=1 if self.cfg.env.num_workers > 0 else None,
+                prefetch_factor=2 if self.cfg.env.num_workers > 0 else None,
                 collate_fn=None,
+                persistent_workers=True,
+                pin_memory=True
             ),
             "valid": torch.utils.data.DataLoader(
                 self.datasets["valid"],
                 batch_size=self.cfg.gpu_batch_size,
                 shuffle=False,
                 num_workers=self.cfg.env.num_workers,
-                prefetch_factor=1 if self.cfg.env.num_workers > 0 else None,
+                prefetch_factor=2 if self.cfg.env.num_workers > 0 else None,
                 collate_fn=None,
+                persistent_workers=True,
+                pin_memory=True
             ),
         }
 
