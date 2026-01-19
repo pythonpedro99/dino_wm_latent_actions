@@ -572,7 +572,7 @@ def load_model(
     )
 
     
-    model.load_state_dict(result["model"], strict=False)
+    model.load_state_dict(result["model"], strict=True)
 
     model.to(device)
     model.eval()
