@@ -358,7 +358,7 @@ class Trainer:
     def init_models(self):
 
         # -------------------------
-        # initialize encoder (PLAIN)
+        # initialize encoder 
         # -------------------------
         if self.encoder is None:
             self.encoder = hydra.utils.instantiate(self.cfg.encoder)
@@ -368,13 +368,13 @@ class Trainer:
                 p.requires_grad = False
 
         # -------------------------
-        # action encoder (optional) (PLAIN)
+        # action encoder 
         # -------------------------
         if self.cfg.model.use_action_encoder:
             if self.action_encoder is None:
                 self.action_encoder = hydra.utils.instantiate(
                     self.cfg.action_encoder,
-                    in_chans=self.datasets["train"].action_dim * self.cfg.dataset.frameskip,
+                    in_chans=self.datasets["train"].action_dim,
                     emb_dim=self.cfg.model.action_emb_dim,
                 )
 
