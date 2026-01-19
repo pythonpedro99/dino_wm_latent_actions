@@ -397,15 +397,15 @@ class Trainer:
             num_side_patches = self.cfg.dataset.img_size // decoder_scale
             num_patches = num_side_patches**2
 
-        if self.cfg.concat_dim == 0:
+        if self.cfg.model.concat_dim == 0:
             num_patches += 1
 
         cond_dim_per_step = 0
         if self.cfg.model.concat_dim != 0:
             if self.cfg.model.use_action_encoder:
-                cond_dim_per_step = action_emb_dim * self.cfg.num_action_repeat
+                cond_dim_per_step = action_emb_dim * self.cfg.model.num_action_repeat
             elif self.cfg.model.use_lam:
-                cond_dim_per_step = self.cfg.model.latent_action_dim * self.cfg.num_action_repeat
+                cond_dim_per_step = self.cfg.model.latent_action_dim * self.cfg.model.num_action_repeat
             else:
                 cond_dim_per_step = 0
 
@@ -475,7 +475,7 @@ class Trainer:
                 )
 
             if self.vq_model is None:
-                self.vq_model = hydra.utils.instantiate(self.cfg.latent_vq_model)
+                self.vq_model = hydra.utils.instantiate(self.cfg.vq_model)
 
             latent_dim = (
                 self.cfg.model.codebook_splits * self.cfg.model.codebook_dim

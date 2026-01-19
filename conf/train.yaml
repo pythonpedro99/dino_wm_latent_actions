@@ -6,7 +6,7 @@ defaults:
   - decoder: vqvae
   - predictor: vit
   - latent_action_model: default
-  - latent_vq_model: default
+  - vq_model: default
   - override hydra/launcher: submitit_slurm
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
