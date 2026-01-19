@@ -440,17 +440,10 @@ def load_model(
     use_vq           = bool(getattr(model_cfg.model, "use_vq"))
     plan_action_type = cfg_dict.get("plan_action_type")
 
-    # 2) Build submodules exactly as training did
-    # NOTE: The exact kwargs here depend on your Hydra configs.
-    # This version passes only what is clearly available in your snippet.
+
     encoder = hydra.utils.instantiate(
         model_cfg.encoder,
     )
-
-    # -------------------------
-    # predictor (dynamic dim) (PLAIN) — planning-time
-    # Mirrors init_models(): derives num_patches and predictor_dim, then instantiates predictor with them
-    # -------------------------
 
     # num_patches
     if getattr(encoder, "latent_ndim", None) == 1:
@@ -575,7 +568,7 @@ def load_model(
         use_action_encoder=use_action_encoder,
         use_lam=use_lam,
         use_vq=use_vq,
-        plan_action_type=plan_action_type,
+        plan_action_type="raw",
     )
 
     
