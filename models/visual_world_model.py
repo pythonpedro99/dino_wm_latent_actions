@@ -374,6 +374,16 @@ class VWorldModel(nn.Module):
         return z
 
     def rollout(self, obs, act, num_obs_init):
+        
+
+        if act is not None:
+            T_obs = obs.shape[1]
+            T_act = act.shape[1]
+
+            if T_act == T_obs - 1:
+                act = torch.cat([act, act[:, -1:, ...]], dim=1)  # repeat last action
+            elif T_act != T_obs:
+                raise ValueError(f"Action length mismatch: obs T={T_obs}, act T={T_act}")
         encode_output = self.encode(obs, act)
 
         # initial context
