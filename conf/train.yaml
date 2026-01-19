@@ -34,12 +34,12 @@ hydra:
 
 training:
   seed: 0
-  epochs: 3
-  batch_size: 32                   # should >= nodes * tasks_per_node
+  epochs: 2
+  batch_size: 64                   # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
   reconstruct_every_x_batch: 500
   num_reconstruct_samples: 6
-  num_workers: 18
+  num_workers: 10
   encoder_lr: 1e-6
   decoder_lr: 3e-4
   predictor_lr: 5e-4
