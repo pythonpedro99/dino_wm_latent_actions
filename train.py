@@ -610,29 +610,46 @@ class Trainer:
 
         # LAM optimizer (LAM mode)
         if self.cfg.model.use_lam and self.train_lam:
-            if (
-                getattr(self.model, "latent_action_model", None) is None
-                or getattr(self.model, "vq_model", None) is None
-                or getattr(self.model, "latent_action_down", None) is None
-            ):
+
+            # --- Sanity checks (only what is semantically required) ---
+            if getattr(self.model, "latent_action_model", None) is None:
                 raise RuntimeError(
-                    "train_lam=True but one or more LAM modules are None "
-                    f"(latent_action_model={getattr(self.model, 'latent_action_model', None) is not None}, "
-                    f"vq_model={getattr(self.model, 'vq_model', None) is not None}, "
-                    f"latent_action_down={getattr(self.model, 'latent_action_down', None) is not None})."
+                    "train_lam=True but latent_action_model is None"
                 )
 
-            if getattr(self, "latent_optimizer", None) is None:
-                latent_params = itertools.chain(
-                    self.model.latent_action_model.parameters(),
-                    self.model.vq_model.parameters(),
-                    self.model.latent_action_down.parameters(),
+            if getattr(self.model, "latent_action_down", None) is None:
+                raise RuntimeError(
+                    "train_lam=True but latent_action_down is None"
                 )
+
+            if self.cfg.model.use_vq and getattr(self.model, "vq_model", None) is None:
+                raise RuntimeError(
+                    "use_vq=True but vq_model is None"
+                )
+
+            # --- Optimizer initialization ---
+            if getattr(self, "latent_optimizer", None) is None:
+
+                latent_param_groups = [
+                    self.model.latent_action_model.parameters(),
+                    self.model.latent_action_down.parameters(),
+                ]
+
+                # Only include VQ parameters if VQ is actually used
+                if self.cfg.model.use_vq:
+                    latent_param_groups.append(
+                        self.model.vq_model.parameters()
+                    )
+
+                latent_params = itertools.chain(*latent_param_groups)
+
                 self.latent_optimizer = torch.optim.AdamW(
                     latent_params,
                     lr=self.cfg.training.latent_lr,
                 )
-                self.latent_optimizer = self.accelerator.prepare(self.latent_optimizer)
+                self.latent_optimizer = self.accelerator.prepare(
+                    self.latent_optimizer
+                )
 
 
 
