@@ -1,6 +1,6 @@
 # Action-Label-Free World-Model Planning: Extending
 DINO-WM with Inverse Dynamics
-[[Thesis]](https://arxiv.org/abs/2411.04983) [[Code]]() [[Datasets]](https://osf.io/bmw48/?view_only=a56a296ce3b24cceaf408383a175ce28) 
+[[Thesis]](https://arxiv.org/abs/2411.04983) [[Datasets]](https://osf.io/bmw48/?view_only=a56a296ce3b24cceaf408383a175ce28) 
 
 [Julian Quast](https://gaoyuezhou.github.io/), Technische Universität Berlin
 
