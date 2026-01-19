@@ -497,8 +497,11 @@ class Trainer:
 
             if not self.train_lam:
                 for module in [self.latent_action_model, self.vq_model, self.latent_action_down]:
+                    if module is None:
+                        continue
                     for p in module.parameters():
                         p.requires_grad = False
+
 
             log.info(
                 "LAM enabled (use_lam=True). train_lam=%s, latent_dim=%s",
