@@ -77,7 +77,7 @@ class Trainer:
             log.info(f"Model saved dir: {cfg['saved_folder']}")
         cfg_dict = cfg_to_dict(cfg)
         model_name = cfg_dict["saved_folder"].split("outputs/")[-1]
-        model_name += f"_{self.cfg.env.name}_f{self.cfg.frameskip}_h{self.cfg.num_hist}_p{self.cfg.num_pred}"
+        model_name += f"_{self.cfg.env.name}_f{self.cfg.dataset.frameskip}_h{self.cfg.model.num_hist}_p{self.cfg.model.num_pred}"
 
         if HydraConfig.get().mode == RunMode.MULTIRUN:
             log.info(" Multirun setup begin...")
@@ -180,16 +180,20 @@ class Trainer:
                 shuffle=True,
                 generator=g_train,
                 num_workers=self.cfg.env.num_workers,
-                prefetch_factor=1 if self.cfg.env.num_workers > 0 else None,
+                prefetch_factor=2 if self.cfg.env.num_workers > 0 else None,
                 collate_fn=None,
+                persistent_workers=True,
+                pin_memory=True
             ),
             "valid": torch.utils.data.DataLoader(
                 self.datasets["valid"],
                 batch_size=self.cfg.gpu_batch_size,
                 shuffle=False,
                 num_workers=self.cfg.env.num_workers,
-                prefetch_factor=1 if self.cfg.env.num_workers > 0 else None,
+                prefetch_factor=2 if self.cfg.env.num_workers > 0 else None,
                 collate_fn=None,
+                persistent_workers=True,
+                pin_memory=True
             ),
         }
 
@@ -354,7 +358,7 @@ class Trainer:
     def init_models(self):
 
         # -------------------------
-        # initialize encoder (PLAIN)
+        # initialize encoder 
         # -------------------------
         if self.encoder is None:
             self.encoder = hydra.utils.instantiate(self.cfg.encoder)
@@ -364,13 +368,13 @@ class Trainer:
                 p.requires_grad = False
 
         # -------------------------
-        # action encoder (optional) (PLAIN)
+        # action encoder 
         # -------------------------
         if self.cfg.model.use_action_encoder:
             if self.action_encoder is None:
                 self.action_encoder = hydra.utils.instantiate(
                     self.cfg.action_encoder,
-                    in_chans=self.datasets["train"].action_dim * self.cfg.dataset.frameskip,
+                    in_chans=self.datasets["train"].action_dim,
                     emb_dim=self.cfg.model.action_emb_dim,
                 )
 
@@ -474,22 +478,30 @@ class Trainer:
                     patch_size=getattr(self.encoder, "patch_size", 1),
                 )
 
-            if self.vq_model is None:
+            self.vq_model = None
+
+            if self.cfg.model.use_lam and self.cfg.model.use_vq:
                 self.vq_model = hydra.utils.instantiate(self.cfg.vq_model)
 
-            latent_dim = (
-                self.cfg.model.codebook_splits * self.cfg.model.codebook_dim
-                if hasattr(self.cfg.model, "codebook_splits")
-                else self.cfg.model.latent_action_dim
-            )
+            # latent dimensionality is representation-dependent
+            if self.cfg.model.use_vq:
+                latent_dim = (
+                    self.cfg.model.codebook_splits * self.cfg.model.codebook_dim
+                )
+            else:
+                latent_dim = self.cfg.model.latent_action_dim
+
 
             if self.latent_action_down is None:
                 self.latent_action_down = nn.Linear(self.encoder.emb_dim, latent_dim)
 
             if not self.train_lam:
                 for module in [self.latent_action_model, self.vq_model, self.latent_action_down]:
+                    if module is None:
+                        continue
                     for p in module.parameters():
                         p.requires_grad = False
+
 
             log.info(
                 "LAM enabled (use_lam=True). train_lam=%s, latent_dim=%s",
@@ -537,7 +549,11 @@ class Trainer:
         if self.latent_action_down is not None:
             model_kwargs["latent_action_down"] = self.latent_action_down
 
-        self.model = hydra.utils.instantiate(self.cfg.model, **model_kwargs)
+        self.model = hydra.utils.instantiate(
+                    {"_target_": self.cfg.model._target_},
+                    **model_kwargs,
+)
+
 
         # -------------------------
         # prepare ONCE (no nested DDP)
@@ -597,29 +613,46 @@ class Trainer:
 
         # LAM optimizer (LAM mode)
         if self.cfg.model.use_lam and self.train_lam:
-            if (
-                getattr(self.model, "latent_action_model", None) is None
-                or getattr(self.model, "vq_model", None) is None
-                or getattr(self.model, "latent_action_down", None) is None
-            ):
+
+            # --- Sanity checks (only what is semantically required) ---
+            if getattr(self.model, "latent_action_model", None) is None:
                 raise RuntimeError(
-                    "train_lam=True but one or more LAM modules are None "
-                    f"(latent_action_model={getattr(self.model, 'latent_action_model', None) is not None}, "
-                    f"vq_model={getattr(self.model, 'vq_model', None) is not None}, "
-                    f"latent_action_down={getattr(self.model, 'latent_action_down', None) is not None})."
+                    "train_lam=True but latent_action_model is None"
                 )
 
-            if getattr(self, "latent_optimizer", None) is None:
-                latent_params = itertools.chain(
-                    self.model.latent_action_model.parameters(),
-                    self.model.vq_model.parameters(),
-                    self.model.latent_action_down.parameters(),
+            if getattr(self.model, "latent_action_down", None) is None:
+                raise RuntimeError(
+                    "train_lam=True but latent_action_down is None"
                 )
+
+            if self.cfg.model.use_vq and getattr(self.model, "vq_model", None) is None:
+                raise RuntimeError(
+                    "use_vq=True but vq_model is None"
+                )
+
+            # --- Optimizer initialization ---
+            if getattr(self, "latent_optimizer", None) is None:
+
+                latent_param_groups = [
+                    self.model.latent_action_model.parameters(),
+                    self.model.latent_action_down.parameters(),
+                ]
+
+                # Only include VQ parameters if VQ is actually used
+                if self.cfg.model.use_vq:
+                    latent_param_groups.append(
+                        self.model.vq_model.parameters()
+                    )
+
+                latent_params = itertools.chain(*latent_param_groups)
+
                 self.latent_optimizer = torch.optim.AdamW(
                     latent_params,
                     lr=self.cfg.training.latent_lr,
                 )
-                self.latent_optimizer = self.accelerator.prepare(self.latent_optimizer)
+                self.latent_optimizer = self.accelerator.prepare(
+                    self.latent_optimizer
+                )
 
 
 
@@ -953,7 +986,7 @@ class Trainer:
                     self.dataloaders["valid"],
                     desc=f"Epoch {self.epoch} Valid",
                     disable=not self.accelerator.is_main_process,
-                    position=1,
+                    position=0,
                 )
             ):
                 obs, act, _ = data
@@ -1032,13 +1065,13 @@ class Trainer:
             self, dset, num_rollout=10, rand_start_end=True, min_horizon=5, mode="train"
         ):
         np.random.seed(self.cfg.training.seed)
-        min_horizon = min_horizon + self.cfg.num_hist
+        min_horizon = min_horizon + self.cfg.model.num_hist
         plotting_dir = f"rollout_plots/e{self.epoch}_rollout"
         if self.accelerator.is_main_process:
             os.makedirs(plotting_dir, exist_ok=True)
         logs = {}
 
-        num_past = [(self.cfg.num_hist, ""), (1, "_1framestart")]
+        num_past = [(self.cfg.model.num_hist, ""), (1, "_1framestart")]
 
         for idx in range(num_rollout):
             valid_traj = False
@@ -1047,30 +1080,30 @@ class Trainer:
                 obs, act, _,_ = dset[traj_idx]
                 act = act.to(self.device)
                 if rand_start_end:
-                    if obs["visual"].shape[0] > min_horizon * self.cfg.frameskip + 1:
+                    if obs["visual"].shape[0] > min_horizon * self.cfg.dataset.frameskip + 1:
                         start = np.random.randint(
                             0,
-                            obs["visual"].shape[0] - min_horizon * self.cfg.frameskip - 1,
+                            obs["visual"].shape[0] - min_horizon * self.cfg.dataset.frameskip - 1,
                         )
                     else:
                         start = 0
-                    max_horizon = (obs["visual"].shape[0] - start - 1) // self.cfg.frameskip
+                    max_horizon = (obs["visual"].shape[0] - start - 1) // self.cfg.dataset.frameskip
                     if max_horizon > min_horizon:
                         valid_traj = True
                         horizon = np.random.randint(min_horizon, max_horizon + 1)
                 else:
                     valid_traj = True
                     start = 0
-                    horizon = (obs["visual"].shape[0] - 1) // self.cfg.frameskip
+                    horizon = (obs["visual"].shape[0] - 1) // self.cfg.dataset.frameskip
 
             for k in obs.keys():
                 obs[k] = obs[k][
                     start :
-                    start + horizon * self.cfg.frameskip + 1 :
-                    self.cfg.frameskip
+                    start + horizon * self.cfg.dataset.frameskip + 1 :
+                    self.cfg.dataset.frameskip
                 ]
-            act = act[start : start + horizon * self.cfg.frameskip]
-            act = rearrange(act, "(h f) d -> h (f d)", f=self.cfg.frameskip)
+            act = act[start : start + horizon * self.cfg.dataset.frameskip]
+            act = rearrange(act, "(h f) d -> h (f d)", f=self.cfg.dataset.frameskip)
 
             obs_g = {}
             for k in obs.keys():

@@ -12,7 +12,6 @@ dataset:
   relative: true
   action_scale: ${dataset.action_scale}
   data_path: ${oc.env:DATASET_DIR}
-  split_ratio: 0.9
   process_actions: "concat"
   transform:
     _target_: "datasets.img_transforms.default_transform"
