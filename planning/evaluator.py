@@ -27,6 +27,8 @@ class PlanEvaluator:  # evaluator for planning
         seed,
         preprocessor,
         n_plot_samples,
+        plan_action_type,
+        action_decoder=None,
     ):
         self.obs_0 = obs_0
         self.obs_g = obs_g
@@ -39,6 +41,10 @@ class PlanEvaluator:  # evaluator for planning
         self.preprocessor = preprocessor
         self.n_plot_samples = n_plot_samples
         self.device = next(wm.parameters()).device
+        self.plan_action_type = plan_action_type
+        self.action_decoder = action_decoder
+        if self.action_decoder is not None:
+            self.action_decoder.eval()
 
         self.plot_full = False  # plot all frames or frames after frameskip
 
@@ -60,17 +66,21 @@ class PlanEvaluator:  # evaluator for planning
         return new_dct
 
     def _get_traj_last(self, traj_data, length):
-        last_index = np.where(length == np.inf, -1, length - 1)
-        last_index = last_index.astype(int)
+        # last_index: -1 where length==inf, else length-1
+        last_index = np.where(length == np.inf, -1, length - 1).astype(np.int64)
+
         if isinstance(traj_data, torch.Tensor):
-            traj_data = traj_data[np.arange(traj_data.shape[0]), last_index].unsqueeze(
-                1
-            )
+            B = traj_data.shape[0]
+            idx0 = torch.arange(B, device=traj_data.device)
+            idx1 = torch.as_tensor(last_index, device=traj_data.device, dtype=torch.long)
+            traj_last = traj_data[idx0, idx1].unsqueeze(1)
+            return traj_last
         else:
-            traj_data = np.expand_dims(
+            traj_last = np.expand_dims(
                 traj_data[np.arange(traj_data.shape[0]), last_index], axis=1
             )
-        return traj_data
+            return traj_last
+
 
     def _mask_traj(self, data, length):
         """
@@ -103,15 +113,26 @@ class PlanEvaluator:  # evaluator for planning
         )
         with torch.no_grad():
             i_z_obses, _ = self.wm.rollout(
-                obs_0=trans_obs_0,
+                obs=trans_obs_0,
                 act=actions,
+                num_obs_init=self.wm.num_hist
             )
         i_final_z_obs = self._get_trajdict_last(i_z_obses, action_len + 1)
 
         # rollout in env
+        env_actions = actions
+        if self.plan_action_type in {"latent", "discrete"}:
+            if self.action_decoder is None:
+                raise ValueError(
+                    "plan_action_type requires an action_decoder for env rollout, but none was provided."
+                )
+            with torch.no_grad():
+                env_actions = self.action_decoder(env_actions)
+        
+        
         exec_actions = rearrange(
-            actions.cpu(), "b t (f d) -> b (t f) d", f=self.frameskip
-        )
+            env_actions.detach().cpu(), "b t (f d) -> b (t f) d", f=self.frameskip
+             )
         exec_actions = self.preprocessor.denormalize_actions(exec_actions).numpy()
         e_obses, e_states = self.env.rollout(self.seed, self.state_0, exec_actions)
         e_visuals = e_obses["visual"]
@@ -168,20 +189,15 @@ class PlanEvaluator:  # evaluator for planning
 
         visual_dists = np.linalg.norm(e_obs["visual"] - self.obs_g["visual"], axis=1)
         mean_visual_dist = np.mean(visual_dists)
-        proprio_dists = np.linalg.norm(e_obs["proprio"] - self.obs_g["proprio"], axis=1)
-        mean_proprio_dist = np.mean(proprio_dists)
 
         e_obs = move_to_device(self.preprocessor.transform_obs(e_obs), self.device)
         e_z_obs = self.wm.encode_obs(e_obs)
         div_visual_emb = torch.norm(e_z_obs["visual"] - i_z_obs["visual"]).item()
-        div_proprio_emb = torch.norm(e_z_obs["proprio"] - i_z_obs["proprio"]).item()
 
         logs.update({
-            "mean_visual_dist": mean_visual_dist,
-            "mean_proprio_dist": mean_proprio_dist,
-            "mean_div_visual_emb": div_visual_emb,
-            "mean_div_proprio_emb": div_proprio_emb,
-        })
+                "mean_pixel_l2": mean_visual_dist,
+                "mean_emb_l2": div_visual_emb,
+            })
 
         return logs, successes
 

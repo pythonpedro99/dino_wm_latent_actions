@@ -13,6 +13,7 @@ class BasePlanner(ABC):
         evaluator,
         wandb_run,
         log_filename,
+        plan_action_type,
         **kwargs,
     ):
         self.wm = wm
@@ -20,6 +21,7 @@ class BasePlanner(ABC):
         self.objective_fn = objective_fn
         self.preprocessor = preprocessor
         self.device = next(wm.parameters()).device
+        self.plan_action_type = plan_action_type
 
         self.evaluator = evaluator
         self.wandb_run = wandb_run

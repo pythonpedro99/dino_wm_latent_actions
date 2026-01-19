@@ -20,6 +20,7 @@ class CEMPlanner(BasePlanner):
         preprocessor,
         evaluator,
         wandb_run,
+        plan_action_type,
         logging_prefix="plan_0",
         log_filename="logs.json",
         **kwargs,
@@ -32,6 +33,7 @@ class CEMPlanner(BasePlanner):
             evaluator,
             wandb_run,
             log_filename,
+            plan_action_type,
         )
         self.horizon = horizon
         self.topk = topk
@@ -106,8 +108,9 @@ class CEMPlanner(BasePlanner):
                 action[0] = mu[traj]  # optional: make the first one mu itself
                 with torch.no_grad():
                     i_z_obses, i_zs = self.wm.rollout(
-                        obs_0=cur_trans_obs_0,
+                        obs=cur_trans_obs_0,
                         act=action,
+                        num_obs_init=self.wm.num_hist
                     )
 
                 loss = self.objective_fn(i_z_obses, cur_z_obs_g)

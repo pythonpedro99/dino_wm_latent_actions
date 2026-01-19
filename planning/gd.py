@@ -20,6 +20,7 @@ class GDPlanner(BasePlanner):
         preprocessor,
         evaluator,
         wandb_run,
+        plan_action_type,
         logging_prefix="plan_0",
         log_filename="logs.json",
         **kwargs,
@@ -32,6 +33,7 @@ class GDPlanner(BasePlanner):
             evaluator,
             wandb_run,
             log_filename,
+            plan_action_type,
         )
         self.horizon = horizon
         self.action_noise = action_noise
@@ -57,11 +59,12 @@ class GDPlanner(BasePlanner):
                 new_actions = torch.randn(n_evals, remaining_t, self.action_dim)
             elif self.sample_type == "zero":  # zero action of env
                 new_actions = torch.zeros(n_evals, remaining_t, self.action_dim)
-                new_actions = rearrange(
-                    new_actions, "... (f d) -> ... f d", f=self.evaluator.frameskip
-                )
-                new_actions = self.preprocessor.normalize_actions(new_actions)
-                new_actions = rearrange(new_actions, "... f d -> ... (f d)")
+                if self.plan_action_type == "raw":
+                    new_actions = rearrange(
+                        new_actions, "... (f d) -> ... f d", f=self.evaluator.frameskip
+                    )
+                    new_actions = self.preprocessor.normalize_actions(new_actions)
+                    new_actions = rearrange(new_actions, "... f d -> ... (f d)")
             actions = torch.cat([actions, new_actions.to(device)], dim=1)
         return actions
 
@@ -92,8 +95,9 @@ class GDPlanner(BasePlanner):
         for i in range(self.opt_steps):
             optimizer.zero_grad()
             i_z_obses, i_zs = self.wm.rollout(
-                obs_0=trans_obs_0,
+                obs=trans_obs_0,
                 act=actions,
+                num_obs_init=self.wm.num_hist
             )
             loss = self.objective_fn(i_z_obses, z_obs_g_detached)  # (n_evals, )
             total_loss = loss.mean() * n_evals  # loss for each eval is independent
