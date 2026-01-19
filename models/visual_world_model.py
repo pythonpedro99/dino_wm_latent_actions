@@ -374,6 +374,7 @@ class VWorldModel(nn.Module):
         return z
 
     def rollout(self, obs, act, num_obs_init):
+        
         if act is not None:
             act = torch.cat([act, act[:, -1:, ...]], dim=1)  # repeat last action
     
