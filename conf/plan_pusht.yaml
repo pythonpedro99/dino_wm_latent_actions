@@ -49,7 +49,7 @@ planner:
   max_iter: null 
   n_taken_actions: 1
   sub_planner:
-    target: planning.cem.DiscreteCEMPlanner  # when plan_action_type is "discrete" use cem.DiscreteCEMPlanner only 
+    target: planning.discrete_cem.DiscreteCEMPlanner  # when plan_action_type is "discrete" use cem.DiscreteCEMPlanner only 
     horizon: 5
     topk: 30
     num_samples: 300
