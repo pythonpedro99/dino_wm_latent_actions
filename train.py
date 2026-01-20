@@ -538,6 +538,7 @@ class Trainer:
         use_lam=self.cfg.model.use_lam,
         use_vq=self.cfg.model.use_vq,
         plan_action_type=self.cfg.model.plan_action_type,
+        is_training=self.cfg.model.is_training,
     )
 
         if self.action_encoder is not None:

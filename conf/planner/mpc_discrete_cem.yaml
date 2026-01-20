@@ -1,0 +1,19 @@
+_target_: planning.mpc.MPCPlanner
+max_iter: 10
+n_taken_actions: 1
+sub_planner:
+  target: planning.discrete_cem.DiscreteCEMPlanner
+  horizon: 5
+  topk: 30
+  num_samples: 300
+  var_scale: 1
+  opt_steps: 30
+  eval_every: 1
+  pseudocount: 0.0
+  momentum: 0.1
+  min_prob: 0.0001
+  init_smoothing: 0.0
+  sample_temperature: 1.0
+  use_mode_as_first_sample: false
+
+name: mpc_discrete_cem

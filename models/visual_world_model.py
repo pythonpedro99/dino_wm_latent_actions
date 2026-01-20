@@ -26,6 +26,7 @@ class VWorldModel(nn.Module):
         use_action_encoder,
         use_lam,
         use_vq,
+        is_training=None,
         plan_action_type: Optional[str] = None,
         action_encoder=None,
         latent_action_model=None,
@@ -38,6 +39,7 @@ class VWorldModel(nn.Module):
         self.use_action_encoder = use_action_encoder
         self.use_lam = use_lam
         self.use_vq = use_vq
+        self.is_training = is_training
 
         self.encoder = encoder
         self.action_encoder = action_encoder
@@ -374,9 +376,25 @@ class VWorldModel(nn.Module):
         return z
 
     def rollout(self, obs, act, num_obs_init):
-        
+
         if act is not None:
             act = torch.cat([act, act[:, -1:, ...]], dim=1)  # repeat last action
+        
+        if (not self.is_training) and act is not None:
+            obs_len = obs["visual"].shape[1]
+            act_len = act.shape[1]
+            if obs_len < act_len:
+                pad_len = act_len - obs_len
+                obs = {
+                    key: torch.cat(
+                        [
+                            arr,
+                            arr[:, -1:, ...].repeat(1, pad_len, *([1] * (arr.dim() - 2))),
+                        ],
+                        dim=1,
+                    )
+                    for key, arr in obs.items()
+                }
     
         encode_output = self.encode(obs, act)
 

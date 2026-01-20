@@ -1,6 +1,7 @@
 # env import
 import gym
 import einops
+import os
 from gym import spaces
 from pymunk.space_debug_draw_options import SpaceDebugColor
 from pymunk.vec2d import Vec2d
@@ -10,11 +11,17 @@ import pymunk
 import numpy as np
 import shapely.geometry as sg
 import cv2
+import os
 import skimage.transform as st
 import pymunk.pygame_util
 import collections
+os.environ["MPLBACKEND"] = "Agg"
 from matplotlib import cm
 import torch
+
+
+
+
 
 # @markdown ### **Environment**
 # @markdown Defines a PyMunk-based Push-T environment `PushTEnv`.

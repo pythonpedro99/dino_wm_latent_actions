@@ -432,13 +432,13 @@ def load_model(
             f"  present: {present}\n"
         )
 
-    action_decoder = result.get("action_decoder", None)
+    action_decoder = nn.Identity()    #result.get("action_decoder", None)
 
-    
     use_action_encoder = bool(getattr(model_cfg.model, "use_action_encoder"))
     use_lam          = bool(getattr(model_cfg.model, "use_lam"))
     use_vq           = bool(getattr(model_cfg.model, "use_vq"))
     plan_action_type = cfg_dict.get("plan_action_type")
+    is_training = cfg_dict.get("is_training")
 
 
     encoder = hydra.utils.instantiate(
@@ -497,7 +497,7 @@ def load_model(
             raise ValueError("use_action_encoder=True but model_cfg.action_encoder is not configured.")
 
 
-        action_dim = int(getattr(getattr(model_cfg, "dataset", None), "action_dim", None) or 0)
+        action_dim = cfg_dict.get("action_dim", 0)
         if action_dim <= 0:
             raise ValueError(
                 "Action encoder requires a valid action_dim. Provide cfg_dict['action_dim'] "
@@ -525,26 +525,21 @@ def load_model(
         in_dim=int(getattr(encoder, "emb_dim")),
         model_dim=int(getattr(encoder, "emb_dim")),
         patch_size=int(getattr(encoder, "patch_size", 1)),
-    )
+        )
 
         if use_vq:
             vq_cfg = getattr(model_cfg, "vq_model", None)
             if vq_cfg is None:
                 raise ValueError("use_vq=True but model_cfg.vq_model is not configured.")
             vq_model = hydra.utils.instantiate(vq_cfg)
+            latent_dim = int(model_cfg.model.codebook_splits) * int(model_cfg.model.codebook_dim)
+        else:
+            latent_dim = int(model_cfg.model.latent_action_dim)
 
-        if plan_action_type == "raw":
-            # latent_dim matches training logic
-            if hasattr(model_cfg.model, "codebook_splits") and hasattr(model_cfg.model, "codebook_dim"):
-                latent_dim = int(model_cfg.model.codebook_splits) * int(model_cfg.model.codebook_dim)
-            else:
-                latent_dim = int(model_cfg.model.latent_action_dim)
+        latent_action_down = nn.Linear(int(getattr(encoder, "emb_dim")), latent_dim)
 
-            latent_action_down = nn.Linear(int(getattr(encoder, "emb_dim")), latent_dim)
-
-    # 3) Instantiate VWorldModel passing module objects (as in training)
     model = hydra.utils.instantiate(
-        model_cfg.model,
+        {"_target_": model_cfg.model._target_},
         encoder=encoder,
         predictor=predictor,
         decoder=None,
@@ -568,8 +563,10 @@ def load_model(
         use_action_encoder=use_action_encoder,
         use_lam=use_lam,
         use_vq=use_vq,
-        plan_action_type="raw",
+        plan_action_type=plan_action_type,
+        is_training=is_training,
     )
+
 
     
     model.load_state_dict(result["model"], strict=True)
@@ -610,16 +607,17 @@ def planning_main(cfg_dict):
         wandb_run = None
 
     ckpt_base_path = cfg_dict["ckpt_base_path"]
-    model_path = f"{ckpt_base_path}/outputs/{cfg_dict['model_name']}/"
+    model_path = f"{ckpt_base_path}/"
     with open(os.path.join(model_path, "hydra.yaml"), "r") as f:
         model_cfg = OmegaConf.load(f)
 
     required_keys = {"model"}
     plan_action_type = cfg_dict["plan_action_type"]
     use_action_encoder = cfg_dict["use_action_encoder"]
+    
 
-    if (not use_action_encoder) and plan_action_type in {"latent", "discrete"}:
-        required_keys.add("action_decoder")
+    # if (not use_action_encoder) and plan_action_type in {"latent", "discrete"}:
+    #     required_keys.add("action_decoder")
 
     seed(cfg_dict["seed"])
     _, dset = hydra.utils.call(
@@ -629,6 +627,7 @@ def planning_main(cfg_dict):
         frameskip=model_cfg.dataset.frameskip,
     )
     dset = dset["valid"]
+    cfg_dict["action_dim"] = dset.action_dim
 
     num_action_repeat = model_cfg.model.num_action_repeat
     model_ckpt = (
