@@ -438,6 +438,7 @@ def load_model(
     use_lam          = bool(getattr(model_cfg.model, "use_lam"))
     use_vq           = bool(getattr(model_cfg.model, "use_vq"))
     plan_action_type = cfg_dict.get("plan_action_type")
+    is_training = cfg_dict.get("is_training")
 
 
     encoder = hydra.utils.instantiate(
@@ -563,6 +564,7 @@ def load_model(
         use_lam=use_lam,
         use_vq=use_vq,
         plan_action_type=plan_action_type,
+        is_training=is_training,
     )
 
 
@@ -612,6 +614,7 @@ def planning_main(cfg_dict):
     required_keys = {"model"}
     plan_action_type = cfg_dict["plan_action_type"]
     use_action_encoder = cfg_dict["use_action_encoder"]
+    
 
     # if (not use_action_encoder) and plan_action_type in {"latent", "discrete"}:
     #     required_keys.add("action_decoder")
