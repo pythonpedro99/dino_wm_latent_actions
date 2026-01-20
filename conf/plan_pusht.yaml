@@ -56,5 +56,11 @@ planner:
     var_scale: 1
     opt_steps: 10
     eval_every: 3
+    pseudocount: 0.0
+    momentum: 0.1
+    min_prob: 0.0001
+    init_smoothing: 0.0
+    sample_temperature: 1.0
+    use_mode_as_first_sample: false
   name: mpc_discrete_cem
 
