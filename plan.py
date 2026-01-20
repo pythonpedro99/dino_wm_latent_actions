@@ -524,21 +524,18 @@ def load_model(
         in_dim=int(getattr(encoder, "emb_dim")),
         model_dim=int(getattr(encoder, "emb_dim")),
         patch_size=int(getattr(encoder, "patch_size", 1)),
-    )
+        )
 
         if use_vq:
             vq_cfg = getattr(model_cfg, "vq_model", None)
             if vq_cfg is None:
                 raise ValueError("use_vq=True but model_cfg.vq_model is not configured.")
             vq_model = hydra.utils.instantiate(vq_cfg)
+            latent_dim = int(model_cfg.model.codebook_splits) * int(model_cfg.model.codebook_dim)
+        else:
+            latent_dim = int(model_cfg.model.latent_action_dim)
 
-        if plan_action_type != "raw":
-            if use_vq:
-                latent_dim = int(model_cfg.model.codebook_splits) * int(model_cfg.model.codebook_dim)
-            else:
-                latent_dim = int(model_cfg.model.latent_action_dim)
-
-            latent_action_down = nn.Linear(int(getattr(encoder, "emb_dim")), latent_dim)
+        latent_action_down = nn.Linear(int(getattr(encoder, "emb_dim")), latent_dim)
 
     model = hydra.utils.instantiate(
         {"_target_": model_cfg.model._target_},
