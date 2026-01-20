@@ -497,7 +497,7 @@ def load_model(
             raise ValueError("use_action_encoder=True but model_cfg.action_encoder is not configured.")
 
 
-        action_dim = int(getattr(getattr(model_cfg, "dataset", None), "action_dim", None) or 0)
+        action_dim = cfg_dict.get("action_dim", 0)
         if action_dim <= 0:
             raise ValueError(
                 "Action encoder requires a valid action_dim. Provide cfg_dict['action_dim'] "
@@ -627,6 +627,7 @@ def planning_main(cfg_dict):
         frameskip=model_cfg.dataset.frameskip,
     )
     dset = dset["valid"]
+    cfg_dict["action_dim"] = dset.action_dim
 
     num_action_repeat = model_cfg.model.num_action_repeat
     model_ckpt = (
