@@ -541,9 +541,8 @@ def load_model(
 
             latent_action_down = nn.Linear(int(getattr(encoder, "emb_dim")), latent_dim)
 
-    # 3) Instantiate VWorldModel passing module objects (as in training)
     model = hydra.utils.instantiate(
-        model_cfg.model,
+        {"_target_": model_cfg.model._target_},
         encoder=encoder,
         predictor=predictor,
         decoder=None,
@@ -567,8 +566,9 @@ def load_model(
         use_action_encoder=use_action_encoder,
         use_lam=use_lam,
         use_vq=use_vq,
-        plan_action_type="raw",
+        plan_action_type=plan_action_type,
     )
+
 
     
     model.load_state_dict(result["model"], strict=True)
