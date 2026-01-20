@@ -62,7 +62,7 @@ model:
   use_vq: false
   has_predictor: True 
   has_decoder: False 
-  plan_action_type: raw # always use raw for training
+  plan_action_type: raw  # always use raw for training
   is_training: true # always true
 
    # training toggles
