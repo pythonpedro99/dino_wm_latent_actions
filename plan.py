@@ -532,9 +532,8 @@ def load_model(
                 raise ValueError("use_vq=True but model_cfg.vq_model is not configured.")
             vq_model = hydra.utils.instantiate(vq_cfg)
 
-        if plan_action_type == "raw":
-            # latent_dim matches training logic
-            if hasattr(model_cfg.model, "codebook_splits") and hasattr(model_cfg.model, "codebook_dim"):
+        if plan_action_type != "raw":
+            if use_vq:
                 latent_dim = int(model_cfg.model.codebook_splits) * int(model_cfg.model.codebook_dim)
             else:
                 latent_dim = int(model_cfg.model.latent_action_dim)
