@@ -29,6 +29,16 @@ dependencies:
   - scikit-image
   - pyyaml
 
+  # --- mujoco_py build/runtime deps (avoid apt; conda-forge approach) ---
+  - mesalib
+  - glew
+  - glfw
+  - patchelf
+  - cmake
+  - swig
+  - libgl
+  - libgl-devel
+
   # pip needed for other Python-only packages
   - pip
 
@@ -46,7 +56,6 @@ dependencies:
       - wandb
       - umap-learn
 
-
       # Planning
       - gym==0.23.1
       - submitit
@@ -57,4 +66,10 @@ dependencies:
       - cloudpickle
 
       # Dataset loaders
-      - decord     # pip version → works in colab
+      - decord
+
+      # --- mujoco_py (legacy gym mujoco backend) ---
+      - "cython<3"
+      - "mujoco-py==2.1.2.14"
+      - PyOpenGL
+      - glfw
