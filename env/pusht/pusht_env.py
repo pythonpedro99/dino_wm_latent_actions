@@ -15,7 +15,7 @@ import os
 import skimage.transform as st
 import pymunk.pygame_util
 import collections
-os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ["MPLBACKEND"] = "Agg"
 from matplotlib import cm
 import torch
 
