@@ -23,7 +23,6 @@ dependencies:
 
   # --- Heavy packages moved to conda (stable) ---
   - pygame
-  - pymunk
   - shapely
   - opencv
   - scikit-image
@@ -60,6 +59,8 @@ dependencies:
       - gym==0.23.1
       - submitit
       - "d4rl==1.1"
+      - "pymunk==6.11.1"
+
 
       # Video IO
       - imageio-ffmpeg
