@@ -1,6 +1,7 @@
 # env import
 import gym
 import einops
+import os
 from gym import spaces
 from pymunk.space_debug_draw_options import SpaceDebugColor
 from pymunk.vec2d import Vec2d
@@ -14,10 +15,11 @@ import os
 import skimage.transform as st
 import pymunk.pygame_util
 import collections
+os.environ.setdefault("MPLBACKEND", "Agg")
 from matplotlib import cm
 import torch
-import os
-os.environ.setdefault("MPLBACKEND", "Agg")
+
+
 
 
 
