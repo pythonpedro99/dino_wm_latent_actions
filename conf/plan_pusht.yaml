@@ -27,14 +27,14 @@ model_name: null
 model_epoch: latest
 
 seed: 99
-n_evals: 50
+n_evals: 5
 goal_source: 'dset'
 goal_H: 5 
 n_plot_samples: 10
-plan_action_type: "raw"  # "raw" or "latent" or "discrete" | raw = baseline, always run with use_action_encoder=True
-use_action_encoder: True   # True for baseline
-use_lam: False   # false for raw, true for discrete and latent
-use_vq: False   #  false for raw, true for discrete
+plan_action_type: "discrete"  # "raw" or "latent" or "discrete" | raw = baseline, always run with use_action_encoder=True
+use_action_encoder: false   # True for baseline
+use_lam: true   # false for raw, true for discrete and latent
+use_vq: true   #  false for raw, true for discrete
 
 debug_dset_init: False
 
@@ -49,12 +49,12 @@ planner:
   max_iter: null 
   n_taken_actions: 1
   sub_planner:
-    target: planning.cem.CEMPlanner  # when plan_action_type is "discrete" use cem.DiscreteCEMPlanner only 
+    target: planning.cem.DiscreteCEMPlanner  # when plan_action_type is "discrete" use cem.DiscreteCEMPlanner only 
     horizon: 5
     topk: 30
     num_samples: 300
     var_scale: 1
     opt_steps: 10
     eval_every: 3
-  name: mpc_cem
+  name: mpc_discrete_cem
 
