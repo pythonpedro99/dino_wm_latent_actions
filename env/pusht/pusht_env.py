@@ -16,8 +16,9 @@ import pymunk.pygame_util
 import collections
 from matplotlib import cm
 import torch
-if os.environ.get("MPLBACKEND") == "module://matplotlib_inline.backend_inline":
-    os.environ["MPLBACKEND"] = "agg"
+import os
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 
 
 # @markdown ### **Environment**
