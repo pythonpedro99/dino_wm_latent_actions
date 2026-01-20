@@ -10,11 +10,15 @@ import pymunk
 import numpy as np
 import shapely.geometry as sg
 import cv2
+import os
 import skimage.transform as st
 import pymunk.pygame_util
 import collections
 from matplotlib import cm
 import torch
+if os.environ.get("MPLBACKEND") == "module://matplotlib_inline.backend_inline":
+    os.environ["MPLBACKEND"] = "agg"
+
 
 # @markdown ### **Environment**
 # @markdown Defines a PyMunk-based Push-T environment `PushTEnv`.
