@@ -85,6 +85,11 @@ model:
   commitment: 0.1
   ema_decay: 0.99
 
+two_phase:
+  enabled: false
+  warmup_steps: 0
+  mix_steps: 0
+
 metrics:
   swap_check_every_n_steps: 100
   ppl_check_every_n_steps: 200
@@ -106,5 +111,4 @@ plan_settings:
   goal_source: ['dset', 'random_state']
   goal_H: [5]
   alpha: [0.1, 1]
-
 

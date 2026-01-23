@@ -40,6 +40,8 @@ class VWorldModel(nn.Module):
         self.use_lam = use_lam
         self.use_vq = use_vq
         self.is_training = is_training
+        self.two_phase_enabled = False
+        self.two_phase_alpha = None
 
         self.encoder = encoder
         self.action_encoder = action_encoder
@@ -168,7 +170,17 @@ class VWorldModel(nn.Module):
                     vq_outputs = self.vq_model(z_a_down_shifted)
                     quantized_latent_actions = vq_outputs["z_q_st"].squeeze(2)
                     vq_outputs["indices"] = vq_outputs["indices"].squeeze(2)
-                    act_base = quantized_latent_actions
+                    if self.two_phase_enabled and self.two_phase_alpha is not None:
+                        alpha = torch.as_tensor(
+                            self.two_phase_alpha,
+                            device=quantized_latent_actions.device,
+                            dtype=quantized_latent_actions.dtype,
+                        )
+                        act_base = (1.0 - alpha) * latent_actions + alpha * quantized_latent_actions
+                    else:
+                        act_base = quantized_latent_actions
+                        if not self.two_phase_enabled:
+                            assert act_base is quantized_latent_actions
                 else:
                     act_base = latent_actions
             else:
@@ -456,5 +468,4 @@ class VWorldModel(nn.Module):
 
         z_obses, _ = self.separate_emb(z)
         return z_obses, z
-
 
