@@ -1160,8 +1160,6 @@ class Trainer:
         # shuffle_z_threshold: 0.65 (>) => bad if swap_s > 0.65
         return (shuffle_delta < self.shuffle_u_threshold) or (swap_s > self.shuffle_z_threshold)
     
-   
-
     @torch.no_grad()
     def metric_z_swap_score(self, z_src, z_tgt, act_base_h) -> float:
         """
