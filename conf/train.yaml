@@ -35,16 +35,15 @@ hydra:
 training:
   seed: 0
   epochs: 2
-  batch_size: 32                   # should >= nodes * tasks_per_node
+  batch_size: 64                   # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
-  reconstruct_every_x_batch: 500
-  num_reconstruct_samples: 6
-  num_workers: 8
-  encoder_lr: 1e-6
-  decoder_lr: 3e-4
-  predictor_lr: 5e-4
-  action_encoder_lr: 5e-4
-  latent_lr: 5e-4
+  num_reconstruct_samples: 0
+  num_workers: 4
+  encoder_lr: 0
+  decoder_lr: 0
+  predictor_lr: 5e-5
+  action_encoder_lr: 2e-4 
+  latent_lr: 2.5e-5
 
 
 dataset:
@@ -72,7 +71,7 @@ model:
   train_action_encoder: true   # explicit, even though use_action_encoder=false
   train_lam: false               # must be true only if use_lam=true
 
-  action_emb_dim: 10 
+  action_emb_dim: 32 
   num_action_repeat: 1
   num_hist: 1
   num_pred: 1 # only supports 1
@@ -80,11 +79,11 @@ model:
   
   # latent-action (VQ) config
   codebook_splits: 1
-  codebook_dim: 10              # latent_action_dim must be = codebook_splits * codebook_dim 
-  latent_action_dim: 10
+  codebook_dim: 32              # latent_action_dim must be = codebook_splits * codebook_dim 
+  latent_action_dim: 32
   num_codes: 16
   commitment: 0.1
-  ema_decay: 0.95
+  ema_decay: 0.99
 
 metrics:
   swap_check_every_n_steps: 100
