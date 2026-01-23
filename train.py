@@ -32,6 +32,28 @@ import torch.nn.functional as F
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
+def two_phase_schedule(global_step, warmup_steps, mix_steps, target_commit):
+    warmup_steps = max(int(warmup_steps), 0)
+    mix_steps = max(int(mix_steps), 0)
+
+    if global_step < warmup_steps:
+        alpha = 0.0
+    elif mix_steps == 0:
+        alpha = 1.0
+    else:
+        alpha = (global_step - warmup_steps) / mix_steps
+
+    alpha = float(max(0.0, min(1.0, alpha)))
+
+    if global_step < warmup_steps:
+        lambda_commit = 0.0
+    elif mix_steps == 0:
+        lambda_commit = float(target_commit)
+    else:
+        lambda_commit = alpha * float(target_commit)
+
+    return alpha, lambda_commit
+
 class JsonlLogger:
     """
     Minimal JSONL logger (one JSON object per line), safe for:
@@ -775,6 +797,27 @@ class Trainer:
             self.model.train()
             if not self.train_encoder:
                 self.model.encoder.eval()
+            two_phase_cfg = getattr(self.cfg, "two_phase", None)
+            two_phase_enabled = bool(getattr(two_phase_cfg, "enabled", False)) if two_phase_cfg is not None else False
+            warmup_steps = int(getattr(two_phase_cfg, "warmup_steps", 0)) if two_phase_cfg is not None else 0
+            mix_steps = int(getattr(two_phase_cfg, "mix_steps", 0)) if two_phase_cfg is not None else 0
+            if two_phase_enabled and (warmup_steps > 0 or mix_steps > 0):
+                alpha, lambda_commit = two_phase_schedule(
+                    self.global_step,
+                    warmup_steps,
+                    mix_steps,
+                    self.cfg.model.commitment,
+                )
+                if self.model.use_vq and getattr(self.model, "vq_model", None) is not None:
+                    self.model.vq_model.commitment = lambda_commit
+                self.model.two_phase_enabled = True
+                self.model.two_phase_alpha = alpha
+                if warmup_steps > 0 and self.global_step < warmup_steps:
+                    assert math.isclose(alpha, 0.0), "Expected alpha=0 during warmup."
+                    assert math.isclose(lambda_commit, 0.0), "Expected lambda_commit=0 during warmup."
+            else:
+                self.model.two_phase_enabled = False
+                self.model.two_phase_alpha = None
             (
                 z_out,
                 visual_out,
