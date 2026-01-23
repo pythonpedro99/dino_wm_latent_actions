@@ -134,7 +134,7 @@ class PushTDataset(TrajDataset):
             return self._reader_cache[key]
 
         vid_dir = self.data_path / "obses"
-        reader = VideoReader(str(vid_dir / f"episode_{key:03d}.mp4"), num_threads=1)
+        reader = VideoReader(str(vid_dir / f"episode_{key:04d}.mp4"), num_threads=1)
 
         self._reader_cache[key] = reader
         self._reader_cache.move_to_end(key)
