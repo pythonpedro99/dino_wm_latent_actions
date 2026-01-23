@@ -77,13 +77,11 @@ class TrajSlicerDataset(TrajDataset):
         for i in range(len(self.dataset)):
             T = self.dataset.get_seq_length(i)
             window = self.num_frames * self.frameskip
-            if T - self.num_frames < 0:
-                print(f"Ignored short sequence #{i}: len={T}, num_frames={self.num_frames}")
+            if T - window < 0:
+                print(f"Ignored short sequence #{i}: len={T}, window={window}")
             else:
-                self.slices += [
-                    (i, start, start + window)
-                    for start in range(T - window + 1)
-                ]
+                self.slices += [(i, start, start + window) for start in range(T - window + 1)]
+
 
         self.proprio_dim = getattr(self.dataset, "proprio_dim", 0)
         self.state_dim = getattr(self.dataset, "state_dim", 0)
@@ -100,24 +98,29 @@ class TrajSlicerDataset(TrajDataset):
         return len(self.slices)
 
     def __getitem__(self, idx):
-        i, start, end = self.slices[idx]
+        i, start, end = self.slices[idx]  # end = start + num_frames*frameskip
 
-        obs, act, state, _ = self.dataset[i]
+        # Frames actually used for the model input (2 frames when num_frames=2):
+        vis_frames = list(range(start, end, self.frameskip))  # length == self.num_frames
 
-        for k, v in obs.items():
-            obs[k] = v[start:end:self.frameskip]
+        # Decode ONLY the needed visual frames
+        # (requires adding PushTDataset.get_visual below)
+        image = self.dataset.get_visual(i, vis_frames)
+        obs = {"visual": image}
 
-        state = state[start:end:self.frameskip]
+        # State: slice directly from preloaded tensors (cheap)
+        state = self.dataset.states[i, vis_frames]
 
-        act_window = act[start:end]  # length = num_frames * frameskip
-
+        # Actions:
         if self.process_actions == "concat":
+            # Need dense action window of length num_frames*frameskip (10 in your case)
+            act_window = self.dataset.actions[i, start:end]  # shape: (window, action_dim)
             act = rearrange(
                 act_window, "(n f) d -> n (f d)",
-                n=self.num_frames,
+                n=self.num_frames, f=self.frameskip
             )
         else:  # "subsample"
-            act = act_window[::self.frameskip]
+            act = self.dataset.actions[i, vis_frames]  # shape: (num_frames, action_dim)
 
         return obs, act, state
 

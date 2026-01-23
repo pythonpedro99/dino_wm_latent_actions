@@ -1,6 +1,7 @@
 import pickle
 from pathlib import Path
 from typing import Callable, Optional, Any, Dict, Sequence, Union
+from collections import OrderedDict
 
 import torch
 import numpy as np
@@ -60,6 +61,10 @@ class PushTDataset(TrajDataset):
         self.relative = relative
         self.normalize_action = normalize_action
         self.with_velocity = with_velocity
+        # ---- per-worker VideoReader cache (each DataLoader worker has its own dataset instance) ----
+        self._reader_cache = OrderedDict()
+        self._reader_cache_max = 8  # tune: 4–16 depending on open file limits / locality
+
 
         # ---- load states (required for planning/evaluator success) ----
         self.states = torch.load(self.data_path / "states.pth").float()
@@ -121,6 +126,37 @@ class PushTDataset(TrajDataset):
 
     def get_seq_length(self, idx: int) -> int:
         return int(self.seq_lengths[idx])
+    
+    def _get_reader(self, idx: int):
+        key = int(idx)
+        if key in self._reader_cache:
+            self._reader_cache.move_to_end(key)
+            return self._reader_cache[key]
+
+        vid_dir = self.data_path / "obses"
+        reader = VideoReader(str(vid_dir / f"episode_{key:03d}.mp4"), num_threads=1)
+
+        self._reader_cache[key] = reader
+        self._reader_cache.move_to_end(key)
+        if len(self._reader_cache) > self._reader_cache_max:
+            self._reader_cache.popitem(last=False)  # evict LRU
+
+        return reader
+
+    def get_visual(self, idx: int, frames: Sequence[int]) -> torch.Tensor:
+        # Ensure frames is a concrete list for decord
+        frames = list(map(int, frames))
+
+        reader = self._get_reader(idx)
+        image = reader.get_batch(frames)  # THWC torch tensor (decord bridge)
+        image = image / 255.0
+        image = rearrange(image, "T H W C -> T C H W")
+
+        if self.transform:
+            image = self.transform(image)
+
+        return image
+
 
     def get_all_actions(self) -> torch.Tensor:
         result = []
@@ -130,14 +166,15 @@ class PushTDataset(TrajDataset):
         return torch.cat(result, dim=0)
 
     def get_frames(self, idx: int, frames: Sequence[int]):
-        vid_dir = self.data_path / "obses"
-        reader = VideoReader(str(vid_dir / f"episode_{idx:03d}.mp4"), num_threads=1)
+        frames = list(map(int, frames))  # important when frames is range()
+
+        reader = self._get_reader(idx)
 
         act = self.actions[idx, frames]
         state = self.states[idx, frames]
         shape = self.shapes[idx]
 
-        image = reader.get_batch(frames)  # THWC (torch tensor due to decord bridge)
+        image = reader.get_batch(frames)
         image = image / 255.0
         image = rearrange(image, "T H W C -> T C H W")
 
@@ -146,9 +183,8 @@ class PushTDataset(TrajDataset):
 
         obs = {"visual": image}
         info: Dict[str, Any] = {"shape": shape}
-
-        # Restored signature: obs, act, state, info
         return obs, act, state, info
+
 
     def __getitem__(self, idx: int):
         return self.get_frames(idx, range(self.get_seq_length(idx)))
