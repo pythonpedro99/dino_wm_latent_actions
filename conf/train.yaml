@@ -56,9 +56,9 @@ dataset:
 model:
   _target_: models.visual_world_model.VWorldModel
   # mode selection (XOR with use_action_encoder)
-  use_action_encoder: true
-  use_lam: false
-  use_vq: false
+  use_action_encoder: false
+  use_lam: true
+  use_vq: true
   has_predictor: True 
   has_decoder: False 
   plan_action_type: raw  # always use raw for training
@@ -68,8 +68,8 @@ model:
   train_encoder: false
   train_predictor: true
   train_decoder: false
-  train_action_encoder: true   # explicit, even though use_action_encoder=false
-  train_lam: false               # must be true only if use_lam=true
+  train_action_encoder: false   # explicit, even though use_action_encoder=false
+  train_lam: true               # must be true only if use_lam=true
 
   action_emb_dim: 32 
   num_action_repeat: 1
@@ -83,12 +83,12 @@ model:
   latent_action_dim: 32
   num_codes: 16
   commitment: 0.1
-  ema_decay: 0.99
+  ema_decay: 0.95
 
 two_phase:
-  enabled: false
-  warmup_steps: 0
-  mix_steps: 0
+  enabled: true
+  warmup_steps: 2000
+  mix_steps: 1000
 
 metrics:
   swap_check_every_n_steps: 100
