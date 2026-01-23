@@ -1163,35 +1163,73 @@ class Trainer:
     @torch.no_grad()
     def metric_z_swap_score(self, z_src, z_tgt, act_base_h) -> float:
         """
-        Information-bypass (z-swap) score in visual-token space.        
+        Information-bypass (z-swap) score in visual-token space.
 
-        Requires self.model:     
-          - separate_emb(z) -> ({"visual": z_visual}, z_act_base)
-          - replace_actions_from_z(z, act_base)
-          - predict(z_src) -> z_pred
+        Improvements (no API change):
+        1A) average over multiple random permutations (K)
+        1C) margin-based comparison (tau)
+        1D) feature normalization before distance computations
         """
         tgt_obs, _ = self.model.separate_emb(z_tgt.detach())
         tgt_vis = tgt_obs["visual"]  # [B,H,P,D_vis]
 
         B, H = act_base_h.shape[:2]
         N = B * H
-        perm = torch.randperm(N, device=z_src.device)
 
-        act_flat = act_base_h.reshape(N, -1)
-        act_swapped = act_flat[perm].reshape_as(act_base_h)
+        # --- config via attributes (optional); safe defaults if not present ---
+        K = int(getattr(self, "swap_perm_k", 8))                 # 1A: number of perms to average
+        tau_mode = getattr(self, "swap_margin_mode", "relative") # {"none","absolute","relative"}
+        tau_abs = float(getattr(self, "swap_margin_abs", 0.0))   # used if tau_mode=="absolute"
+        tau_rel = float(getattr(self, "swap_margin_rel", 1e-3))  # used if tau_mode=="relative"
+        do_norm = bool(getattr(self, "swap_feat_norm", True))    # 1D
 
-        z_src_cf = self.model.replace_actions_from_z(z_src.clone(), act_swapped)
-        z_hat = self.model.predict(z_src_cf)
-
-        hat_obs, _ = self.model.separate_emb(z_hat)
-        hat_vis = hat_obs["visual"]  # [B,H,P,D_vis]
-
-        hat_f = hat_vis.reshape(N, -1)
+        # flatten once
         tgt_f = tgt_vis.reshape(N, -1)
 
-        d_to_j = torch.norm(hat_f - tgt_f[perm], dim=1)
-        d_to_i = torch.norm(hat_f - tgt_f, dim=1)
-        return float((d_to_j < d_to_i).float().mean().item())
+        # 1D: normalize features to reduce scale effects
+        if do_norm:
+            tgt_f = F.normalize(tgt_f, dim=1, eps=1e-8)
+
+        act_flat = act_base_h.reshape(N, -1)
+
+        score_acc = 0.0
+        # (optional) compute a robust scale for relative margin from target features once
+        # We'll compute tau per perm from distances for stability; see below.
+
+        for _ in range(K):
+            perm = torch.randperm(N, device=z_src.device)
+
+            act_swapped = act_flat[perm].reshape_as(act_base_h)
+            z_src_cf = self.model.replace_actions_from_z(z_src.clone(), act_swapped)
+            z_hat = self.model.predict(z_src_cf)
+
+            hat_obs, _ = self.model.separate_emb(z_hat)
+            hat_vis = hat_obs["visual"]  # [B,H,P,D_vis]
+            hat_f = hat_vis.reshape(N, -1)
+
+            if do_norm:
+                hat_f = F.normalize(hat_f, dim=1, eps=1e-8)
+
+            # compute distances
+            d_to_j = torch.norm(hat_f - tgt_f[perm], dim=1)
+            d_to_i = torch.norm(hat_f - tgt_f, dim=1)
+
+            # 1C: margin-based comparison (optional)
+            if tau_mode == "none":
+                wins = (d_to_j < d_to_i)
+            elif tau_mode == "absolute":
+                # require d_i - d_j > tau_abs
+                wins = ((d_to_i - d_to_j) > tau_abs)
+            else:
+                # relative: scale tau by a typical distance in this perm to avoid tuning to a fixed magnitude
+                # Use median of d_to_i as a robust scale proxy
+                tau = tau_rel * (d_to_i.median().clamp_min(1e-8))
+                wins = ((d_to_i - d_to_j) > tau)
+
+            score_acc += wins.float().mean().item()
+
+        return float(score_acc / max(K, 1))
+
 
     @torch.no_grad()
     def metric_action_shuffle_delta(self, z_src, z_tgt, act_base_h, eps: float = 1e-8):
