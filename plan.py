@@ -613,7 +613,7 @@ def planning_main(cfg_dict):
 
     required_keys = {"model"}
     plan_action_type = cfg_dict["plan_action_type"]
-    use_action_encoder = cfg_dict["use_action_encoder"]
+    use_action_encoder = model_cfg["use_action_encoder"]
     
 
     # if (not use_action_encoder) and plan_action_type in {"latent", "discrete"}:
