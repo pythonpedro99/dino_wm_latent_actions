@@ -37,6 +37,7 @@ training:
   epochs: 2
   batch_size: 64                   # should >= nodes * tasks_per_node
   save_every_x_epoch: 1
+  save_every_x_steps: 0
   num_reconstruct_samples: 0
   num_workers: 4
   encoder_lr: 0
@@ -111,4 +112,3 @@ plan_settings:
   goal_source: ['dset', 'random_state']
   goal_H: [5]
   alpha: [0.1, 1]
-
