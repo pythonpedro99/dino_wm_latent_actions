@@ -10,7 +10,7 @@ defaults:
   - override hydra/launcher: submitit_slurm
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
-ckpt_base_path: /content # put absolute path here
+ckpt_base_path: /content/Baseline # put absolute path here
 debug: False 
 
 hydra:
@@ -34,10 +34,10 @@ hydra:
 
 training:
   seed: 0
-  epochs: 2
+  epochs: 10
   batch_size: 64                   # should >= nodes * tasks_per_node
   save_every_x_epoch: 0
-  save_every_x_steps: 4000
+  save_every_x_steps: 2000
   num_reconstruct_samples: 0
   num_workers: 4
   encoder_lr: 0
@@ -51,26 +51,23 @@ dataset:
   normalize_action: True
   action_scale: 100.0
   frameskip: 5
-  img_size: 224 # should be a multiple of 224
-
+  img_size: 224 
 
 model:
   _target_: models.visual_world_model.VWorldModel
-  # mode selection (XOR with use_action_encoder)
-  use_action_encoder: false
-  use_lam: true
-  use_vq: true
+  use_action_encoder: true
+  use_lam: false
+  use_vq: false
   has_predictor: True 
   has_decoder: False 
   plan_action_type: raw  # always use raw for training
-  is_training: true # always true
+  is_training: true      # always true
 
-   # training toggles
   train_encoder: false
   train_predictor: true
   train_decoder: false
-  train_action_encoder: false   # explicit, even though use_action_encoder=false
-  train_lam: true               # must be true only if use_lam=true
+  train_action_encoder: true   # explicit, even though use_action_encoder=false
+  train_lam: false               # must be true only if use_lam=true
 
   action_emb_dim: 32 
   num_action_repeat: 1
@@ -78,7 +75,6 @@ model:
   num_pred: 1 # only supports 1
   concat_dim: 1  # only supports 1 
   
-  # latent-action (VQ) config
   codebook_splits: 1
   codebook_dim: 32              # latent_action_dim must be = codebook_splits * codebook_dim 
   latent_action_dim: 32
@@ -87,7 +83,7 @@ model:
   ema_decay: 0.95
 
 two_phase:
-  enabled: true
+  enabled: false
   warmup_steps: 2000
   mix_steps: 1000
 
