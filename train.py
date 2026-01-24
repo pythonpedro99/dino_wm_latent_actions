@@ -211,11 +211,11 @@ class Trainer:
                 self.datasets["valid"],
                 batch_size=self.cfg.gpu_batch_size,
                 shuffle=False,
-                num_workers=self.cfg.env.num_workers,
-                prefetch_factor=2 if self.cfg.env.num_workers > 0 else None,
+                num_workers=0,
+                prefetch_factor=None,
                 collate_fn=None,
-                persistent_workers=True,
-                pin_memory=True
+                persistent_workers=False,
+                pin_memory=False
             ),
         }
 
