@@ -719,9 +719,6 @@ class Trainer:
             self.logs_flash(step=self.global_step)
             self.val()
             self.logs_flash(step=self.global_step)
-            save_every_x_steps = int(getattr(self.cfg.training, "save_every_x_steps", 0))
-            if save_every_x_steps > 0 and (self.global_step % save_every_x_steps == 0):
-                _ckpt_path, _model_name, _model_epoch = self.save_ckpt()
             if self.cfg.training.save_every_x_epoch > 0 and (self.epoch % self.cfg.training.save_every_x_epoch == 0):
                 ckpt_path, model_name, model_epoch = self.save_ckpt()
                 # main thread only: launch planning jobs on the saved ckpt
@@ -795,6 +792,9 @@ class Trainer:
             )
         ):
             self.global_step += 1
+            save_every_x_steps = int(getattr(self.cfg.training, "save_every_x_steps", 0))
+            if save_every_x_steps > 0 and (self.global_step % save_every_x_steps == 0):
+                _ckpt_path, _model_name, _model_epoch = self.save_ckpt()
             obs, act,_ = data
             plot = False  # dont plot at all
             self.model.train()
