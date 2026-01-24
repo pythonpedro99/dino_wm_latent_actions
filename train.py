@@ -32,6 +32,28 @@ import torch.nn.functional as F
 warnings.filterwarnings("ignore")
 log = logging.getLogger(__name__)
 
+def two_phase_schedule(global_step, warmup_steps, mix_steps, target_commit):
+    warmup_steps = max(int(warmup_steps), 0)
+    mix_steps = max(int(mix_steps), 0)
+
+    if global_step < warmup_steps:
+        alpha = 0.0
+    elif mix_steps == 0:
+        alpha = 1.0
+    else:
+        alpha = (global_step - warmup_steps) / mix_steps
+
+    alpha = float(max(0.0, min(1.0, alpha)))
+
+    if global_step < warmup_steps:
+        lambda_commit = 0.0
+    elif mix_steps == 0:
+        lambda_commit = float(target_commit)
+    else:
+        lambda_commit = alpha * float(target_commit)
+
+    return alpha, lambda_commit
+
 class JsonlLogger:
     """
     Minimal JSONL logger (one JSON object per line), safe for:
@@ -189,11 +211,11 @@ class Trainer:
                 self.datasets["valid"],
                 batch_size=self.cfg.gpu_batch_size,
                 shuffle=False,
-                num_workers=self.cfg.env.num_workers,
-                prefetch_factor=2 if self.cfg.env.num_workers > 0 else None,
+                num_workers=0,
+                prefetch_factor=None,
                 collate_fn=None,
-                persistent_workers=True,
-                pin_memory=True
+                persistent_workers=False,
+                pin_memory=False
             ),
         }
 
@@ -697,7 +719,7 @@ class Trainer:
             self.logs_flash(step=self.global_step)
             self.val()
             self.logs_flash(step=self.global_step)
-            if self.epoch % self.cfg.training.save_every_x_epoch == 0:
+            if self.cfg.training.save_every_x_epoch > 0 and (self.epoch % self.cfg.training.save_every_x_epoch == 0):
                 ckpt_path, model_name, model_epoch = self.save_ckpt()
                 # main thread only: launch planning jobs on the saved ckpt
                 if (
@@ -770,11 +792,35 @@ class Trainer:
             )
         ):
             self.global_step += 1
+            save_every_x_steps = int(getattr(self.cfg.training, "save_every_x_steps", 0))
+            if save_every_x_steps > 0 and (self.global_step % save_every_x_steps == 0):
+                _ckpt_path, _model_name, _model_epoch = self.save_ckpt()
             obs, act,_ = data
             plot = False  # dont plot at all
             self.model.train()
             if not self.train_encoder:
                 self.model.encoder.eval()
+            two_phase_cfg = getattr(self.cfg, "two_phase", None)
+            two_phase_enabled = bool(getattr(two_phase_cfg, "enabled", False)) if two_phase_cfg is not None else False
+            warmup_steps = int(getattr(two_phase_cfg, "warmup_steps", 0)) if two_phase_cfg is not None else 0
+            mix_steps = int(getattr(two_phase_cfg, "mix_steps", 0)) if two_phase_cfg is not None else 0
+            if two_phase_enabled and (warmup_steps > 0 or mix_steps > 0):
+                alpha, lambda_commit = two_phase_schedule(
+                    self.global_step,
+                    warmup_steps,
+                    mix_steps,
+                    self.cfg.model.commitment,
+                )
+                if self.model.use_vq and getattr(self.model, "vq_model", None) is not None:
+                    self.model.vq_model.commitment = lambda_commit
+                self.model.two_phase_enabled = True
+                self.model.two_phase_alpha = alpha
+                if warmup_steps > 0 and self.global_step < warmup_steps:
+                    assert math.isclose(alpha, 0.0), "Expected alpha=0 during warmup."
+                    assert math.isclose(lambda_commit, 0.0), "Expected lambda_commit=0 during warmup."
+            else:
+                self.model.two_phase_enabled = False
+                self.model.two_phase_alpha = None
             (
                 z_out,
                 visual_out,
