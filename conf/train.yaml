@@ -10,7 +10,7 @@ defaults:
   - override hydra/launcher: submitit_slurm
 
 # base path to save model outputs. Checkpoints will be saved to ${ckpt_base_path}/outputs.
-ckpt_base_path: /content/Baseline # put absolute path here
+ckpt_base_path: /content/LatentActionModel # put absolute path here
 debug: False 
 
 hydra:
@@ -55,8 +55,8 @@ dataset:
 
 model:
   _target_: models.visual_world_model.VWorldModel
-  use_action_encoder: true
-  use_lam: false
+  use_action_encoder: false
+  use_lam: true
   use_vq: false
   has_predictor: True 
   has_decoder: False 
@@ -66,8 +66,8 @@ model:
   train_encoder: false
   train_predictor: true
   train_decoder: false
-  train_action_encoder: true   # explicit, even though use_action_encoder=false
-  train_lam: false               # must be true only if use_lam=true
+  train_action_encoder: false   # explicit, even though use_action_encoder=false
+  train_lam: true               # must be true only if use_lam=true
 
   action_emb_dim: 32 
   num_action_repeat: 1
