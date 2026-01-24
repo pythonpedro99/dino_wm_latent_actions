@@ -134,7 +134,30 @@ class PushTDataset(TrajDataset):
             return self._reader_cache[key]
 
         vid_dir = self.data_path / "obses"
-        reader = VideoReader(str(vid_dir / f"episode_{key:04d}.mp4"), num_threads=1)
+
+        # Try both naming conventions: episode_0684.mp4 and episode_684.mp4
+        candidates = [
+            vid_dir / f"episode_{key:04d}.mp4",
+            vid_dir / f"episode_{key}.mp4",
+        ]
+
+        path = next((p for p in candidates if p.exists()), None)
+
+        # Optional: last-resort glob (handles other zero-padding widths)
+        if path is None:
+            matches = list(vid_dir.glob(f"episode_*{key}*.mp4"))
+            if matches:
+                # Prefer the shortest name (usually unpadded) or first stable option
+                matches.sort(key=lambda p: len(p.name))
+                path = matches[0]
+
+        if path is None:
+            raise FileNotFoundError(
+                f"No video found for idx={idx} (key={key}). Tried: "
+                + ", ".join(str(p) for p in candidates)
+            )
+
+        reader = VideoReader(str(path), num_threads=1)
 
         self._reader_cache[key] = reader
         self._reader_cache.move_to_end(key)
