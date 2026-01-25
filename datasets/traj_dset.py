@@ -1,5 +1,4 @@
 import abc
-import warnings
 import torch
 import numpy as np
 from torch.utils.data import Dataset
@@ -64,7 +63,6 @@ class TrajSlicerDataset(TrajDataset):
         self.num_frames = num_frames
         self.frameskip = frameskip
         self.process_actions = process_actions
-        self._warned_short_videos = set()
 
         if self.frameskip < 1:
             raise ValueError(f"frameskip must be >= 1, got {self.frameskip}")
@@ -82,10 +80,7 @@ class TrajSlicerDataset(TrajDataset):
             if T - window < 0:
                 print(f"Ignored short sequence #{i}: len={T}, window={window}")
             else:
-                for start in range(T - window + 1):
-                    end = start + window
-                    if self._slice_has_video(i, start):
-                        self.slices.append((i, start, end))
+                self.slices += [(i, start, start + window) for start in range(T - window + 1)]
 
 
         self.proprio_dim = getattr(self.dataset, "proprio_dim", 0)
@@ -101,32 +96,6 @@ class TrajSlicerDataset(TrajDataset):
 
     def __len__(self):
         return len(self.slices)
-
-    def _slice_has_video(self, idx: int, start: int) -> bool:
-        if not hasattr(self.dataset, "get_num_frames"):
-            return True
-
-        num_frames = self.dataset.get_num_frames(idx)
-        if num_frames < 1:
-            if idx not in self._warned_short_videos:
-                self._warned_short_videos.add(idx)
-                warnings.warn(
-                    f"Video idx={idx} has no frames; skipping all visual slices.",
-                    RuntimeWarning,
-                )
-            return False
-
-        max_visual_index = start + (self.num_frames - 1) * self.frameskip
-        if max_visual_index >= num_frames:
-            if idx not in self._warned_short_videos:
-                self._warned_short_videos.add(idx)
-                warnings.warn(
-                    f"Video idx={idx} has {num_frames} frames; skipping slices that need frame {max_visual_index}.",
-                    RuntimeWarning,
-                )
-            return False
-
-        return True
 
     def __getitem__(self, idx):
         i, start, end = self.slices[idx]  # end = start + num_frames*frameskip
