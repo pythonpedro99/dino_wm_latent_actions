@@ -166,6 +166,10 @@ class PushTDataset(TrajDataset):
 
         return reader
 
+    def get_num_frames(self, idx: int) -> int:
+        reader = self._get_reader(idx)
+        return len(reader)
+
     def get_visual(self, idx: int, frames: Sequence[int]) -> torch.Tensor:
         # Ensure frames is a concrete list for decord
         frames = list(map(int, frames))
@@ -192,7 +196,6 @@ class PushTDataset(TrajDataset):
         frames = list(map(int, frames))  # important when frames is range()
 
         reader = self._get_reader(idx)
-
         act = self.actions[idx, frames]
         state = self.states[idx, frames]
         shape = self.shapes[idx]
