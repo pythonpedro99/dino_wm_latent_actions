@@ -127,9 +127,9 @@ class PushTDataset(TrajDataset):
     def get_seq_length(self, idx: int) -> int:
         return int(self.seq_lengths[idx])
     
-    def _get_reader(self, idx: int, *, cache: bool = True):
+    def _get_reader(self, idx: int):
         key = int(idx)
-        if cache and key in self._reader_cache:
+        if key in self._reader_cache:
             self._reader_cache.move_to_end(key)
             return self._reader_cache[key]
 
@@ -159,16 +159,15 @@ class PushTDataset(TrajDataset):
 
         reader = VideoReader(str(path), num_threads=1)
 
-        if cache:
-            self._reader_cache[key] = reader
-            self._reader_cache.move_to_end(key)
-            if len(self._reader_cache) > self._reader_cache_max:
-                self._reader_cache.popitem(last=False)  # evict LRU
+        self._reader_cache[key] = reader
+        self._reader_cache.move_to_end(key)
+        if len(self._reader_cache) > self._reader_cache_max:
+            self._reader_cache.popitem(last=False)  # evict LRU
 
         return reader
 
     def get_num_frames(self, idx: int) -> int:
-        reader = self._get_reader(idx, cache=False)
+        reader = self._get_reader(idx)
         return len(reader)
 
     def get_visual(self, idx: int, frames: Sequence[int]) -> torch.Tensor:
