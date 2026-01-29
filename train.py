@@ -1021,8 +1021,14 @@ class Trainer:
         if self.accelerator.is_main_process and len(self.train_traj_dset) > 0 and self.cfg.model.has_predictor:
             with torch.no_grad():
                 logs = self.openloop_rollout(self.val_traj_dset, mode="val")
-                logs = {f"val_{k}": [float(v.detach().mean().cpu()) if torch.is_tensor(v) else float(v)]
-                        for k, v in logs.items()}
+                logs = {
+                    f"val_{k}": [
+                        float(v.detach().cpu()) if torch.is_tensor(v) else float(v)
+                        for v in values
+                    ]
+                    for k, values in logs.items()
+                }
+
                 self.logs_update(logs)
 
 
@@ -1185,9 +1191,6 @@ class Trainer:
                         f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}.png",
                     )
 
-        logs = {
-            key: sum(values) / len(values) for key, values in logs.items() if values
-        }
         return logs
     
     def _append_vq_idx(self, vq_idx: torch.Tensor):
