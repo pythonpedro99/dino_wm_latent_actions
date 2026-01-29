@@ -198,7 +198,7 @@ class Trainer:
         self.dataloaders = {
             "train": torch.utils.data.DataLoader(
                 self.datasets["train"],
-                batch_size=self.cfg.gpu_batch_size,
+                batch_size=512,
                 shuffle=True,
                 generator=g_train,
                 num_workers=self.cfg.env.num_workers,
@@ -209,7 +209,7 @@ class Trainer:
             ),
             "valid": torch.utils.data.DataLoader(
                 self.datasets["valid"],
-                batch_size=self.cfg.gpu_batch_size,
+                batch_size=512,
                 shuffle=True,
                 generator=g_train,
                 num_workers=0,
