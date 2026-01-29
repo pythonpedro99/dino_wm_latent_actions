@@ -436,6 +436,281 @@ def save_decoders_into_ckpt(
     }
     torch.save(ckpt, out_path)
 
+# =============================================================================
+# Diagnostics / checks (post-hoc, no saving/loading)
+# =============================================================================
+
+def _entropy_from_counts(counts: torch.Tensor) -> float:
+    # counts: [K] long
+    total = counts.sum().item()
+    if total <= 0:
+        return 0.0
+    p = counts.float() / float(total)
+    p = p[p > 0]
+    return float(-(p * p.log()).sum().item())
+
+
+@torch.no_grad()
+def per_head_rmse_from_preds(y_pred: torch.Tensor, y_true: torch.Tensor) -> Dict[str, float]:
+    """
+    y_pred/y_true: [N,10] layout (x1,y1,...,x5,y5)
+    Returns overall rmse + rmse_head1..5
+    """
+    assert y_true.ndim == 2 and y_true.shape[1] == 10, f"Expected y_true [N,10], got {tuple(y_true.shape)}"
+    assert y_pred.shape == y_true.shape
+
+    err = (y_pred - y_true).view(-1, 5, 2)  # [N,5,2]
+    head_mse = err.pow(2).mean(dim=0).mean(dim=-1)  # [5]
+    head_rmse = head_mse.sqrt()
+
+    overall_rmse = float((y_pred - y_true).pow(2).mean().sqrt().item())
+    out = {"rmse": overall_rmse}
+    for h in range(5):
+        out[f"rmse_head{h+1}"] = float(head_rmse[h].item())
+    return out
+
+
+@torch.no_grad()
+def predict_all(decoder: nn.Module, x: torch.Tensor, *, batch_size: int, device: torch.device) -> torch.Tensor:
+    decoder.eval()
+    preds = []
+    N = x.shape[0]
+    for i in range(0, N, batch_size):
+        xb = x[i:i + batch_size].to(device, non_blocking=True)
+        preds.append(decoder.predict(xb).detach().cpu())
+    return torch.cat(preds, dim=0)
+
+
+def find_codebook_embeddings(root_model: nn.Module, expected_dim: int) -> torch.Tensor:
+    """
+    Best-effort: find a [K, expected_dim] tensor that looks like a VQ codebook.
+    Prefers parameter/module names containing codebook/vq/embed.
+    """
+    candidates = []
+
+    for name, p in root_model.named_parameters():
+        if p is None or p.ndim != 2:
+            continue
+        if int(p.shape[1]) != expected_dim:
+            continue
+        lname = name.lower()
+        score = 0
+        if "codebook" in lname: score += 5
+        if "vq" in lname: score += 3
+        if "embed" in lname or "embedding" in lname: score += 2
+        if score > 0:
+            candidates.append((score, name, p.detach().cpu().float()))
+
+    for name, m in root_model.named_modules():
+        if isinstance(m, nn.Embedding) and m.weight.ndim == 2 and int(m.weight.shape[1]) == expected_dim:
+            candidates.append((1, f"{name}.weight", m.weight.detach().cpu().float()))
+
+    if not candidates:
+        raise RuntimeError(
+            f"[checks] Could not auto-find codebook embeddings with dim={expected_dim}. "
+            f"Add a direct accessor for your model and pass it in explicitly."
+        )
+
+    candidates.sort(key=lambda t: (-t[0], -t[2].shape[0]))
+    score, name, W = candidates[0]
+    print(f"  [checks] codebook: {name}  shape={tuple(W.shape)}  score={score}")
+    return W  # [K,D] on CPU
+
+
+@torch.no_grad()
+def nearest_code_indices(x: torch.Tensor, codebook: torch.Tensor, *, device: torch.device, x_batch: int = 4096) -> torch.Tensor:
+    """
+    x: [N,D] (typically quantized latent vectors)
+    codebook: [K,D]
+    returns idx: [N] long, nearest code in L2
+    batched to avoid huge [N,K] allocations.
+    """
+    assert x.ndim == 2 and codebook.ndim == 2
+    N, D = x.shape
+    K, D2 = codebook.shape
+    assert D == D2
+
+    E = codebook.to(device, non_blocking=True)
+    E_norm = (E ** 2).sum(dim=1).view(1, K)  # [1,K]
+
+    idx_out = torch.empty(N, dtype=torch.long)
+    for i in range(0, N, x_batch):
+        xb = x[i:i + x_batch].to(device, non_blocking=True)       # [B,D]
+        xb_norm = (xb ** 2).sum(dim=1, keepdim=True)              # [B,1]
+        dist2 = xb_norm + E_norm - 2.0 * (xb @ E.t())             # [B,K]
+        idx = dist2.argmin(dim=1).detach().cpu()
+        idx_out[i:i + x_batch] = idx
+    return idx_out
+
+
+@torch.no_grad()
+def decode_codes(decoder: nn.Module, codebook: torch.Tensor, *, device: torch.device, codes_batch: int = 4096) -> torch.Tensor:
+    """
+    returns A = decoder.predict(codebook) -> [K,10]
+    """
+    decoder.eval()
+    K = codebook.shape[0]
+    A_chunks = []
+    for i in range(0, K, codes_batch):
+        eb = codebook[i:i + codes_batch].to(device, non_blocking=True)
+        A_chunks.append(decoder.predict(eb).detach().cpu())
+    return torch.cat(A_chunks, dim=0)
+
+
+@torch.no_grad()
+def oracle_action_space_rmse(y: torch.Tensor, A: torch.Tensor, *, device: torch.device, y_batch: int = 4096) -> Tuple[float, torch.Tensor]:
+    """
+    y: [N,10]
+    A: [K,10] where A[k] = decoded action for code k
+    returns (oracle_rmse, oracle_idx [N])
+    """
+    assert y.ndim == 2 and y.shape[1] == 10
+    assert A.ndim == 2 and A.shape[1] == 10
+    N = y.shape[0]
+    K = A.shape[0]
+    D = 10
+
+    A_dev = A.to(device, non_blocking=True)
+    A_norm = (A_dev ** 2).sum(dim=1).view(1, K)  # [1,K]
+
+    total_min = 0.0
+    idx_out = torch.empty(N, dtype=torch.long)
+
+    for i in range(0, N, y_batch):
+        yb = y[i:i + y_batch].to(device, non_blocking=True)  # [B,10]
+        y_norm = (yb ** 2).sum(dim=1, keepdim=True)          # [B,1]
+        dist2 = y_norm + A_norm - 2.0 * (yb @ A_dev.t())     # [B,K]
+        min_dist2, idx = dist2.min(dim=1)                    # [B]
+        total_min += float(min_dist2.sum().item())
+        idx_out[i:i + yb.shape[0]] = idx.detach().cpu()
+
+    rmse = math.sqrt(total_min / (N * D))
+    return float(rmse), idx_out
+
+
+@torch.no_grad()
+def within_code_action_dispersion(y: torch.Tensor, idx: torch.Tensor, K: int) -> Dict[str, float]:
+    """
+    Measures how diverse the ground-truth actions are within each assigned code.
+    High dispersion => decoder forced to average => irreducible RMSE.
+    y: [N,10], idx: [N] code indices
+    Returns avg within-code std over all dims + per-head std (2D) averaged.
+    """
+    assert y.shape[1] == 10
+    N = y.shape[0]
+
+    counts = torch.zeros(K, dtype=torch.long)
+    sum_ = torch.zeros(K, 10, dtype=torch.float64)
+    sumsq = torch.zeros(K, 10, dtype=torch.float64)
+
+    for i in range(N):
+        k = int(idx[i].item())
+        counts[k] += 1
+        yi = y[i].double()
+        sum_[k] += yi
+        sumsq[k] += yi * yi
+
+    valid = counts > 1
+    if valid.sum().item() == 0:
+        return {"within_std_all": 0.0, **{f"within_std_head{i}": 0.0 for i in range(1,6)}}
+
+    c = counts[valid].double().unsqueeze(1)   # [M,1]
+    mean = sum_[valid] / c                    # [M,10]
+    var = (sumsq[valid] / c) - mean * mean    # [M,10]
+    var = torch.clamp(var, min=0.0)
+    std = var.sqrt()                          # [M,10]
+
+    within_std_all = float(std.mean().item())
+
+    # per head (mean over codes, mean over 2 dims)
+    std_heads = std.view(-1, 5, 2).mean(dim=-1).mean(dim=0)  # [5]
+    out = {"within_std_all": within_std_all}
+    for h in range(5):
+        out[f"within_std_head{h+1}"] = float(std_heads[h].item())
+    return out
+
+
+@torch.no_grad()
+def run_checks(
+    *,
+    latent_source: str,
+    trainer_model: nn.Module,
+    decoder: nn.Module,
+    x_val: torch.Tensor,
+    y_val: torch.Tensor,
+    device: torch.device,
+    pred_batch: int,
+    codes_batch: int = 4096,
+    y_batch: int = 4096,
+) -> None:
+    """
+    Runs the minimal set of checks immediately after decoder training.
+    For vq: requires access to the VQ codebook via trainer_model.
+    """
+    print("  [checks] running post-hoc checks...")
+
+    # 1) Decoder predictions on val + per-head RMSE + normalization by target std
+    y_pred = predict_all(decoder, x_val, batch_size=pred_batch, device=device)
+    rmse = per_head_rmse_from_preds(y_pred, y_val)
+
+    y_std = y_val.std(dim=0, unbiased=False)  # [10]
+    nrmse = float(((y_pred - y_val).pow(2).mean().sqrt() / (y_std.mean().clamp(min=1e-8))).item())
+
+    print(
+        f"  [checks] pred rmse={rmse['rmse']:.4f}  nrmse~={nrmse:.4f}  "
+        + "  ".join([f"h{i}={rmse[f'rmse_head{i}']:.4f}" for i in range(1, 6)])
+    )
+
+    # 2) VQ-specific checks
+    if latent_source == "vq":
+        codebook = find_codebook_embeddings(trainer_model, expected_dim=x_val.shape[1])  # [K,32]
+        K = int(codebook.shape[0])
+
+        # 2a) assigned code indices from x_val (should be exact-ish if x_val is quantized embeddings)
+        idx_assigned = nearest_code_indices(x_val, codebook, device=device, x_batch=y_batch)
+        counts = torch.bincount(idx_assigned, minlength=K)
+        used = int((counts > 0).sum().item())
+        ent = _entropy_from_counts(counts)
+
+        print(f"  [checks] assigned code usage: used={used}/{K}  entropy={ent:.3f}")
+
+        # 2b) decode each code once
+        A = decode_codes(decoder, codebook, device=device, codes_batch=codes_batch)  # [K,10]
+
+        # 2c) action-space oracle (tight lower bound for RMSE metric)
+        oracle_rmse, idx_oracle = oracle_action_space_rmse(y_val, A, device=device, y_batch=y_batch)
+
+        # compare assigned vs oracle
+        y_assigned = A.index_select(0, idx_assigned)  # [N,10]
+        assigned_rmse = float((y_assigned - y_val).pow(2).mean().sqrt().item())
+        match = float((idx_assigned == idx_oracle).float().mean().item())
+
+        oracle_head = per_head_rmse_from_preds(A.index_select(0, idx_oracle), y_val)
+        assigned_head = per_head_rmse_from_preds(y_assigned, y_val)
+
+        print(
+            f"  [checks] ORACLE action-space rmse={oracle_rmse:.4f} | "
+            f"assigned-via-codes rmse={assigned_rmse:.4f} | "
+            f"match(assigned==oracle)={match*100:.2f}% | gap={assigned_rmse - oracle_rmse:+.4f}"
+        )
+        print(
+            "  [checks] ORACLE per-head:   "
+            + "  ".join([f"h{i}={oracle_head[f'rmse_head{i}']:.4f}" for i in range(1, 6)])
+        )
+        print(
+            "  [checks] ASSIGNED per-head: "
+            + "  ".join([f"h{i}={assigned_head[f'rmse_head{i}']:.4f}" for i in range(1, 6)])
+        )
+
+        # 2d) within-code dispersion (how much averaging is forced)
+        disp = within_code_action_dispersion(y_val, idx_assigned, K=K)
+        print(
+            f"  [checks] within-code dispersion std_all={disp['within_std_all']:.4f}  "
+            + "  ".join([f"h{i}={disp[f'within_std_head{i}']:.4f}" for i in range(1, 6)])
+        )
+
+    print("  [checks] done.")
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -455,6 +730,7 @@ def main():
     ap.add_argument("--n_layers", type=int, default=4)
     ap.add_argument("--n_primitives", type=int, default=5)
     ap.add_argument("--mdn_components", type=int, default=5)
+    ap.add_argument("--checks", action="store_true")
 
     # training hyperparams
     ap.add_argument("--pair_batch_size", type=int, default=4096)
@@ -605,7 +881,21 @@ def main():
             ga_rmse = results["gauss"]["best_val"]["rmse"]
             mdn_rmse = results["mdn"]["best_val"]["rmse"]
             print(f"  SUMMARY (val_rmse lower=better): det={det_rmse:.6f}  gauss={ga_rmse:.6f}  mdn={mdn_rmse:.6f}")
-
+            
+            if args.checks:
+                # Usually deterministic is the cleanest for diagnostics because predict() is straightforward.
+                run_checks(
+                    latent_source=latent_source,
+                    trainer_model=trainer.model,
+                    decoder=results["det"]["model"],   # best-state already loaded
+                    x_val=x_val,
+                    y_val=y_val,
+                    device=device,
+                    pred_batch=args.pair_batch_size,
+                    codes_batch=4096,
+                    y_batch=4096,
+                )
+                
             last_models = {k: v["model"] for k, v in results.items()}
             last_target = target_pairs
 
