@@ -1356,14 +1356,22 @@ class Trainer:
 
     def logs_update(self, logs):
         for key, value in logs.items():
+            # value should be a list of floats
             if isinstance(value, torch.Tensor):
-                value = value.detach().cpu().item()
+                value = value.detach().cpu().tolist()
+
             length = len(value)
-            count, total = self.epoch_log.get(key, (0, 0.0))
-            self.epoch_log[key] = (
-                count + length,
-                total + sum(value),
-            )
+            s = sum(value)
+            ssq = sum(v * v for v in value)
+
+            if key not in self.epoch_log:
+                # count, sum, sumsq
+                self.epoch_log[key] = [0, 0.0, 0.0]
+
+            self.epoch_log[key][0] += length
+            self.epoch_log[key][1] += s
+            self.epoch_log[key][2] += ssq
+
 
     def logs_flash(self, step):
         epoch_log = OrderedDict()
