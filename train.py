@@ -1109,7 +1109,7 @@ class Trainer:
 
 
     def openloop_rollout(
-            self, dset, num_rollout=10, rand_start_end=True, min_horizon=5, mode="train"
+            self, dset, num_rollout=200, rand_start_end=True, min_horizon=5, mode="train"
         ):
         np.random.seed(self.cfg.training.seed)
         min_horizon = min_horizon + self.cfg.model.num_hist
