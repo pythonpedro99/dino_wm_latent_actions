@@ -1027,6 +1027,7 @@ class Trainer:
 
 
         self.accelerator.wait_for_everyone()
+        val_component_values = {}
         with torch.no_grad():
             for i, data in enumerate(
                 tqdm(
@@ -1048,6 +1049,8 @@ class Trainer:
                 loss_components = {
                     key: value.mean().item() for key, value in loss_components.items()
                 }
+                for key, value in loss_components.items():
+                    val_component_values.setdefault(key, []).append(value)
 
                 if self.cfg.model.has_decoder and plot:
                     # only eval images when plotting due to speed
@@ -1106,6 +1109,15 @@ class Trainer:
                     )
                 loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
                 self.logs_update(loss_components)
+            if val_component_values:
+                val_component_std = {}
+                for key, values in val_component_values.items():
+                    if not values:
+                        continue
+                    val_tensor = torch.tensor(values, dtype=torch.float32)
+                    val_component_std[f"val_{key}_std"] = [val_tensor.std(unbiased=False).item()]
+                if val_component_std:
+                    self.logs_update(val_component_std)
 
 
     def openloop_rollout(
@@ -1185,10 +1197,18 @@ class Trainer:
                         f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}.png",
                     )
 
-        logs = {
-            key: sum(values) / len(values) for key, values in logs.items() if values
-        }
-        return logs
+        stats = {}
+        for key, values in logs.items():
+            if not values:
+                continue
+            tensor_vals = [
+                v.detach().float().cpu() if torch.is_tensor(v) else torch.tensor(v, dtype=torch.float32)
+                for v in values
+            ]
+            stacked = torch.stack(tensor_vals)
+            stats[key] = stacked.mean()
+            stats[f"{key}_std"] = stacked.std(unbiased=False)
+        return stats
     
     def _append_vq_idx(self, vq_idx: torch.Tensor):
         # store flattened indices on CPU to avoid GPU memory growth
