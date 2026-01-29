@@ -26,7 +26,7 @@ ckpt_base_path: /content/drive/MyDrive/DINO-WM/Model Checkpoints/Tests/14-57-38 
 model_name: null
 model_epoch: latest
 
-seed: 99
+seed: 0
 n_evals: 5
 goal_source: 'dset'
 goal_H: 5 
