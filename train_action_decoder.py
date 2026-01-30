@@ -711,6 +711,91 @@ def run_checks(
 
     print("  [checks] done.")
 
+def _pca_2d_from_actions(y: torch.Tensor, *, standardize: bool = True) -> Tuple[torch.Tensor, Tuple[float, float]]:
+    """
+    y: [N,10] actions (x1,y1,...,x5,y5)
+    Returns:
+      coords: [N,2] PCA coordinates
+      evr: (evr1, evr2) explained variance ratios for PC1/PC2
+    """
+    assert y.ndim == 2, f"Expected [N,10], got {tuple(y.shape)}"
+    y = y.float()
+
+    if standardize:
+        mu = y.mean(dim=0, keepdim=True)
+        sig = y.std(dim=0, unbiased=False, keepdim=True).clamp_min(1e-8)
+        y = (y - mu) / sig
+
+    # center
+    y = y - y.mean(dim=0, keepdim=True)
+
+    # SVD-based PCA (N x D, D=10)
+    # y = U @ diag(S) @ Vh
+    U, S, Vh = torch.linalg.svd(y, full_matrices=False)  # Vh: [D,D]
+    V = Vh.transpose(0, 1)  # [D,D], columns are principal directions
+
+    comps = V[:, :2]                 # [D,2]
+    coords = y @ comps               # [N,2]
+
+    # explained variance ratio
+    N = y.shape[0]
+    eig = (S ** 2) / max(N - 1, 1)   # [D]
+    total = eig.sum().clamp_min(1e-12)
+    evr1 = float((eig[0] / total).item())
+    evr2 = float((eig[1] / total).item())
+
+    return coords, (evr1, evr2)
+
+
+def plot_action_pca_colored_by_code(
+    y_val: torch.Tensor,
+    code_idx: torch.Tensor,
+    *,
+    out_path: Path,
+    dpi: int = 600,
+    max_points: int = 0,
+    seed: int = 0,
+) -> None:
+    """
+    Saves ONE figure:
+      PCA(actions 10D->2D), scatter colored by VQ code index.
+    """
+    import matplotlib.pyplot as plt
+
+    assert y_val.ndim == 2 and y_val.shape[1] == 10, f"Expected y_val [N,10], got {tuple(y_val.shape)}"
+    assert code_idx.ndim == 1 and code_idx.shape[0] == y_val.shape[0], (
+        f"Expected code_idx [N], got {tuple(code_idx.shape)} vs N={y_val.shape[0]}"
+    )
+
+    N = y_val.shape[0]
+    if max_points and max_points > 0 and max_points < N:
+        g = torch.Generator().manual_seed(seed)
+        perm = torch.randperm(N, generator=g)[:max_points]
+        y = y_val.index_select(0, perm)
+        idx = code_idx.index_select(0, perm)
+    else:
+        y = y_val
+        idx = code_idx
+
+    coords, (evr1, evr2) = _pca_2d_from_actions(y, standardize=True)
+
+    x = coords[:, 0].cpu().numpy()
+    yy = coords[:, 1].cpu().numpy()
+    c = idx.cpu().numpy()
+
+    plt.figure(figsize=(8, 8))
+    plt.scatter(x, yy, c=c, s=2, alpha=0.9, linewidths=0)
+    plt.xlabel(f"PC1 (EVR {evr1*100:.1f}%)")
+    plt.ylabel(f"PC2 (EVR {evr2*100:.1f}%)")
+    plt.title("Action PCA (10D→2D) colored by VQ code (val pairs)")
+    plt.tight_layout()
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path.as_posix(), dpi=int(dpi), bbox_inches="tight")
+    plt.close()
+    print(f"  [plot] saved: {out_path}  (dpi={dpi}, points={len(c)})")
+
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -751,6 +836,13 @@ def main():
 
     # logging
     ap.add_argument("--quiet_sampling", action="store_true")
+        # plotting: action PCA colored by VQ code
+    ap.add_argument("--plot_action_pca", action="store_true")
+    ap.add_argument("--plot_path", type=str, default="action_pca_by_code.png")
+    ap.add_argument("--plot_dpi", type=int, default=600)
+    ap.add_argument("--plot_max_points", type=int, default=0, help="0 = use all points")
+    ap.add_argument("--plot_seed", type=int, default=0)
+
 
     args = ap.parse_args()
 
@@ -812,6 +904,29 @@ def main():
         val_buf = PairBuffer()
         fill_buffer_to(val_stream, val_buf, target_pairs=args.val_pairs, quiet=args.quiet_sampling)
         x_val, y_val = val_buf.tensors()
+                # --- Q1 figure: PCA(actions)->2D colored by VQ code (val set) ---
+        if args.plot_action_pca:
+            if latent_source != "vq":
+                print("  [plot] plot_action_pca requested, but latent_source != 'vq' -> skipping (need codes).")
+            else:
+                # assign a discrete code index per x_val by nearest codebook embedding
+                codebook = find_codebook_embeddings(trainer.model, expected_dim=x_val.shape[1])  # [K,D]
+                idx_assigned = nearest_code_indices(x_val, codebook, device=device, x_batch=4096)  # [N]
+
+                plot_path = Path(args.plot_path)
+                if not plot_path.is_absolute():
+                    # since you chdir(run_dir), this lands in run_dir by default
+                    plot_path = (Path.cwd() / plot_path).resolve()
+
+                plot_action_pca_colored_by_code(
+                    y_val=y_val,
+                    code_idx=idx_assigned,
+                    out_path=plot_path,
+                    dpi=args.plot_dpi,
+                    max_points=args.plot_max_points,
+                    seed=args.plot_seed,
+                )
+
 
         in_dim = int(x_val.shape[1])
         out_dim = int(y_val.shape[1])
