@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from omegaconf import OmegaConf
-from models.action_decoder import DeterministicActionDecoder5Head, GaussianActionDecoder5Head, MDNActionDecoder5Head
+from models.action_decoder import DeterministicActionDecoder5Head, GaussianActionDecoder5Head, MDNActionDecoder5Head, DeterministicProxyDecoder
 
 # hard-disable wandb (Trainer calls wandb.init)
 os.environ["WANDB_MODE"] = "disabled"
@@ -386,21 +386,31 @@ def train_with_early_stopping(
     }
 
 
-def build_decoders(in_dim: int, out_dim: int, *, hidden_dim: int, n_layers: int, n_primitives: int, mdn_components: int):
-    assert out_dim == 2 * n_primitives, (
-        f"Expected out_dim=2*n_primitives, got out_dim={out_dim}, n_primitives={n_primitives}"
-    )
+def build_decoders(
+    in_dim: int,
+    out_dim: int,
+    *,
+    hidden_dim: int,
+    n_layers: int,
+    n_primitives: int,
+    mdn_components: int,
+    target: str,
+):
+    if target == "action10":
+        assert out_dim == 2 * n_primitives, (
+            f"Expected out_dim=2*n_primitives, got out_dim={out_dim}, n_primitives={n_primitives}"
+        )
+        return {
+            "det": DeterministicActionDecoder5Head(in_dim=in_dim, hidden_dim=hidden_dim, n_layers=n_layers, n_primitives=n_primitives),
+            "gauss": GaussianActionDecoder5Head(in_dim=in_dim, hidden_dim=hidden_dim, n_layers=n_layers, n_primitives=n_primitives),
+            "mdn": MDNActionDecoder5Head(in_dim=in_dim, hidden_dim=hidden_dim, n_layers=n_layers, n_primitives=n_primitives, n_components=mdn_components),
+        }
+
+    # proxy targets: generic vector decoders
     return {
-        "det": DeterministicActionDecoder5Head(
-            in_dim=in_dim, hidden_dim=hidden_dim, n_layers=n_layers, n_primitives=n_primitives
-        ),
-        "gauss": GaussianActionDecoder5Head(
-            in_dim=in_dim, hidden_dim=hidden_dim, n_layers=n_layers, n_primitives=n_primitives
-        ),
-        "mdn": MDNActionDecoder5Head(
-            in_dim=in_dim, hidden_dim=hidden_dim, n_layers=n_layers, n_primitives=n_primitives, n_components=mdn_components
-        ),
+        "det": DeterministicProxyDecoder(in_dim=in_dim, hidden_dim=hidden_dim, n_layers=n_layers, out_dim=out_dim),
     }
+
 
 
 def parse_int_list(s: str) -> List[int]:
@@ -860,6 +870,53 @@ def plot_action_pca_colored_by_code(
     plt.close()
     print(f"  [plot] saved: {out_path} (dpi={dpi}, points={len(c)})")
 
+
+def make_target(y_action: torch.Tensor, *, target: str, n_primitives: int, eps: float = 1e-8) -> torch.Tensor:
+    """
+    y_action: [N, 2*n_primitives] (default n_primitives=5 => [N,10])
+    Returns y_target with shape:
+      - action10: [N,10]
+      - proxy_r2: [N,2]      (resultant vector)
+      - proxy_dir3: [N,3]    (unit direction + magnitude)
+      - proxy_endbend3: [N,3] (endpoint displacement + bend scalar)
+    """
+    y = y_action.float()
+    N, A = y.shape
+    assert A == 2 * n_primitives, f"Expected y_action dim {2*n_primitives}, got {A}"
+
+    if target == "action10":
+        return y
+
+    a = y.view(N, n_primitives, 2)        # [N,5,2]
+    r = a.sum(dim=1)                      # [N,2]
+
+    if target == "proxy_r2":
+        return r
+
+    if target == "proxy_dir3":
+        m = torch.linalg.norm(r, dim=-1, keepdim=True)     # [N,1]
+        d = r / (m + eps)                                  # [N,2]
+        return torch.cat([d, m], dim=-1)                    # [N,3]
+
+    if target == "proxy_endbend3":
+        # cumulative positions p_t in pusher-relative coords
+        p = torch.cumsum(a, dim=1)      # [N,5,2]
+        Delta = p[:, -1, :]             # [N,2]
+        norm = torch.linalg.norm(Delta, dim=-1, keepdim=True)  # [N,1]
+        u = Delta / (norm + eps)        # [N,2]
+        n = torch.stack([-u[:, 1], u[:, 0]], dim=-1)  # [N,2] perpendicular
+
+        # deviation from straight line at t=1..(H-1)
+        H = n_primitives
+        t = torch.arange(1, H, device=y.device, dtype=y.dtype).view(1, H-1, 1)  # [1,4,1]
+        lin = (t / float(H)) * Delta.view(N, 1, 2)                               # [N,4,2]
+        dev = p[:, :H-1, :] - lin                                                # [N,4,2]
+        b = (dev * n.view(N, 1, 2)).sum(dim=-1).mean(dim=1, keepdim=True)        # [N,1]
+        return torch.cat([Delta, b], dim=-1)                                     # [N,3]
+
+    raise ValueError(f"Unknown target={target!r}")
+
+
 # -----------------------------------------------------------------------------
 # main() (UPDATED call site)
 # - adds CLI flags to control standardization + colormap
@@ -885,6 +942,14 @@ def main():
     ap.add_argument("--n_primitives", type=int, default=5)
     ap.add_argument("--mdn_components", type=int, default=5)
     ap.add_argument("--checks", action="store_true")
+    ap.add_argument(
+    "--target",
+    type=str,
+    default="action10",
+    choices=["action10", "proxy_r2", "proxy_dir3", "proxy_endbend3"],
+    help="Training target: action10 (5x2) or proxy variants."
+)
+
 
     # training hyperparams
     ap.add_argument("--pair_batch_size", type=int, default=4096)
@@ -974,7 +1039,10 @@ def main():
         val_stream = PairStream(trainer, split="valid", latent_source=latent_source, device=device)
         val_buf = PairBuffer()
         fill_buffer_to(val_stream, val_buf, target_pairs=args.val_pairs, quiet=args.quiet_sampling)
-        x_val, y_val = val_buf.tensors()
+        
+        x_val, y_val_action = val_buf.tensors()
+        y_val = make_target(y_val_action, target=args.target, n_primitives=args.n_primitives)
+
 
         # --- Q1 figure: PCA(actions)->2D colored by VQ code (val set) ---
         if args.plot_action_pca:
@@ -989,7 +1057,7 @@ def main():
                     plot_path = (Path.cwd() / plot_path).resolve()
 
                 plot_action_pca_colored_by_code(
-                    y_val=y_val,
+                    y_val=y_val_action,
                     code_idx=idx_assigned,
                     out_path=plot_path,
                     dpi=args.plot_dpi,
@@ -1016,7 +1084,9 @@ def main():
 
         for target_pairs in train_pair_targets:
             fill_buffer_to(train_stream, train_buf, target_pairs=target_pairs, quiet=args.quiet_sampling)
-            x_train, y_train = train_buf.tensors()
+            x_train, y_train_action = train_buf.tensors()
+            y_train = make_target(y_train_action, target=args.target, n_primitives=args.n_primitives)
+
 
             if x_train.shape[1] != in_dim or y_train.shape[1] != out_dim:
                 raise RuntimeError(
@@ -1034,7 +1104,9 @@ def main():
                 n_layers=args.n_layers,
                 n_primitives=args.n_primitives,
                 mdn_components=args.mdn_components,
+                target=args.target,
             )
+
             for m in models.values():
                 m.to(device)
 

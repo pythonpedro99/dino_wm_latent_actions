@@ -15,6 +15,42 @@ import torch.nn.functional as F
 #   - (optional) nll(z,a) for probabilistic models
 # =============================================================================
 
+_LOG_2PI = math.log(2.0 * math.pi)
+
+def _mlp(in_dim: int, hidden_dim: int, out_dim: int, n_layers: int) -> nn.Sequential:
+    layers = []
+    d = in_dim
+    for _ in range(int(n_layers)):
+        layers.append(nn.Linear(d, hidden_dim))
+        layers.append(nn.ReLU(inplace=True))
+        d = hidden_dim
+    layers.append(nn.Linear(d, out_dim))
+    return nn.Sequential(*layers)
+
+
+class DeterministicProxyDecoder(nn.Module):
+    """
+    Deterministic regression decoder for proxy targets.
+    API: predict(x)->yhat, loss(x,y)->scalar
+    """
+    def __init__(self, *, in_dim: int, hidden_dim: int, n_layers: int, out_dim: int):
+        super().__init__()
+        self.in_dim = int(in_dim)
+        self.out_dim = int(out_dim)
+        self.net = _mlp(in_dim, hidden_dim, out_dim, n_layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+    @torch.no_grad()
+    def predict(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward(x)
+
+    def loss(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        yhat = self.forward(x)
+        return F.mse_loss(yhat, y)
+
+
 class DeterministicActionDecoder5Head(nn.Module):
     """
     Shared MLP trunk + N primitive heads, each predicting a 2D primitive action.
