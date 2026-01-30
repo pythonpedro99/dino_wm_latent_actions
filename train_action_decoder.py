@@ -711,16 +711,41 @@ def run_checks(
 
     print("  [checks] done.")
 
-def _pca_2d_from_actions(y: torch.Tensor, *, standardize: bool = True) -> Tuple[torch.Tensor, Tuple[float, float]]:
+# -----------------------------------------------------------------------------
+# PCA + plotting (UPDATED)
+# - discrete/distinct-ish colors with fixed vmin/vmax and colorbar ticks
+# - prints std checks (max/min ratio) to decide whether to standardize
+# - prints used codes + counts for the plotted subset
+# -----------------------------------------------------------------------------
+def _pca_2d_from_actions(
+    y: torch.Tensor,
+    *,
+    standardize: bool = True,
+    print_std_checks: bool = True,
+) -> Tuple[torch.Tensor, Tuple[float, float]]:
     """
     y: [N,10] actions (x1,y1,...,x5,y5)
     Returns:
       coords: [N,2] PCA coordinates
       evr: (evr1, evr2) explained variance ratios for PC1/PC2
     """
-    assert y.ndim == 2, f"Expected [N,10], got {tuple(y.shape)}"
+    assert y.ndim == 2, f"Expected y [N,10], got {tuple(y.shape)}"
     y = y.float()
 
+    # --- diagnostics on raw y ---
+    if print_std_checks:
+        std = y.std(dim=0, unbiased=False)
+        std_min = float(std.min().item())
+        std_max = float(std.max().item())
+        ratio = std_max / max(std_min, 1e-12)
+        print(f"  [pca] raw action std per-dim: {[float(v) for v in std.tolist()]}")
+        print(f"  [pca] std_min={std_min:.6g} std_max={std_max:.6g} max/min={ratio:.3f}")
+        if ratio < 2.0:
+            print("  [pca] std spread small -> standardize likely unnecessary.")
+        elif ratio > 5.0:
+            print("  [pca] std spread large -> standardize recommended.")
+
+    # optional standardization
     if standardize:
         mu = y.mean(dim=0, keepdim=True)
         sig = y.std(dim=0, unbiased=False, keepdim=True).clamp_min(1e-8)
@@ -729,17 +754,16 @@ def _pca_2d_from_actions(y: torch.Tensor, *, standardize: bool = True) -> Tuple[
     # center
     y = y - y.mean(dim=0, keepdim=True)
 
-    # SVD-based PCA (N x D, D=10)
-    # y = U @ diag(S) @ Vh
+    # SVD-based PCA (N x D)
     U, S, Vh = torch.linalg.svd(y, full_matrices=False)  # Vh: [D,D]
-    V = Vh.transpose(0, 1)  # [D,D], columns are principal directions
+    V = Vh.transpose(0, 1)  # [D,D]
 
-    comps = V[:, :2]                 # [D,2]
-    coords = y @ comps               # [N,2]
+    comps = V[:, :2]          # [D,2]
+    coords = y @ comps        # [N,2]
 
     # explained variance ratio
     N = y.shape[0]
-    eig = (S ** 2) / max(N - 1, 1)   # [D]
+    eig = (S ** 2) / max(N - 1, 1)
     total = eig.sum().clamp_min(1e-12)
     evr1 = float((eig[0] / total).item())
     evr2 = float((eig[1] / total).item())
@@ -755,10 +779,17 @@ def plot_action_pca_colored_by_code(
     dpi: int = 600,
     max_points: int = 0,
     seed: int = 0,
+    standardize: bool = False,
+    K: Optional[int] = None,
+    cmap: str = "tab20",
 ) -> None:
     """
     Saves ONE figure:
       PCA(actions 10D->2D), scatter colored by VQ code index.
+
+    - discrete-ish colors using fixed vmin/vmax (code bins)
+    - prints code usage counts for the plotted subset
+    - prints action std checks (raw) to guide standardization choice
     """
     import matplotlib.pyplot as plt
 
@@ -767,35 +798,73 @@ def plot_action_pca_colored_by_code(
         f"Expected code_idx [N], got {tuple(code_idx.shape)} vs N={y_val.shape[0]}"
     )
 
+    # Determine K (number of codes) for stable color binning
+    if K is None:
+        K = int(code_idx.max().item()) + 1
+    K = int(K)
+
+    # Optional subsample (keeps pairing)
     N = y_val.shape[0]
     if max_points and max_points > 0 and max_points < N:
-        g = torch.Generator().manual_seed(seed)
-        perm = torch.randperm(N, generator=g)[:max_points]
+        g = torch.Generator().manual_seed(int(seed))
+        perm = torch.randperm(N, generator=g)[: int(max_points)]
         y = y_val.index_select(0, perm)
         idx = code_idx.index_select(0, perm)
+        print(f"  [plot] subsample: {N} -> {y.shape[0]} (seed={seed})")
     else:
         y = y_val
         idx = code_idx
 
-    coords, (evr1, evr2) = _pca_2d_from_actions(y, standardize=True)
+    # Print code usage on the plotted subset
+    counts = torch.bincount(idx, minlength=K)
+    used = int((counts > 0).sum().item())
+    nz = torch.nonzero(counts > 0).view(-1)
+    nz_pairs = [(int(k.item()), int(counts[k].item())) for k in nz]
+    print(f"  [plot] codes used in plotted set: {used}/{K}")
+    print(f"  [plot] nonzero code counts (code:count): {nz_pairs}")
+
+    # PCA on actions
+    coords, (evr1, evr2) = _pca_2d_from_actions(y, standardize=bool(standardize), print_std_checks=True)
 
     x = coords[:, 0].cpu().numpy()
     yy = coords[:, 1].cpu().numpy()
     c = idx.cpu().numpy()
 
+    # Discrete binning for integer codes
+    vmin = -0.5
+    vmax = K - 0.5
+
     plt.figure(figsize=(8, 8))
-    plt.scatter(x, yy, c=c, s=2, alpha=0.9, linewidths=0)
+    sc = plt.scatter(
+        x, yy,
+        c=c,
+        s=2,
+        alpha=0.9,
+        linewidths=0,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+    )
+
+    # Colorbar with integer ticks
+    cbar = plt.colorbar(sc, ticks=list(range(K)))
+    cbar.set_label("VQ code index")
+
     plt.xlabel(f"PC1 (EVR {evr1*100:.1f}%)")
     plt.ylabel(f"PC2 (EVR {evr2*100:.1f}%)")
-    plt.title("Action PCA (10D→2D) colored by VQ code (val pairs)")
+    plt.title(f"Action PCA (10D→2D) colored by VQ code (val pairs) | standardize={standardize}")
     plt.tight_layout()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out_path.as_posix(), dpi=int(dpi), bbox_inches="tight")
     plt.close()
-    print(f"  [plot] saved: {out_path}  (dpi={dpi}, points={len(c)})")
+    print(f"  [plot] saved: {out_path} (dpi={dpi}, points={len(c)})")
 
-
+# -----------------------------------------------------------------------------
+# main() (UPDATED call site)
+# - adds CLI flags to control standardization + colormap
+# - passes K=codebook.shape[0] so colors are stable even if some codes unused
+# -----------------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser()
@@ -836,13 +905,15 @@ def main():
 
     # logging
     ap.add_argument("--quiet_sampling", action="store_true")
-        # plotting: action PCA colored by VQ code
+
+    # plotting: action PCA colored by VQ code
     ap.add_argument("--plot_action_pca", action="store_true")
     ap.add_argument("--plot_path", type=str, default="action_pca_by_code.png")
     ap.add_argument("--plot_dpi", type=int, default=600)
     ap.add_argument("--plot_max_points", type=int, default=0, help="0 = use all points")
     ap.add_argument("--plot_seed", type=int, default=0)
-
+    ap.add_argument("--plot_standardize", action="store_true", help="Standardize per action dim before PCA")
+    ap.add_argument("--plot_cmap", type=str, default="tab20", help="Matplotlib colormap name (e.g., tab20)")
 
     args = ap.parse_args()
 
@@ -904,18 +975,17 @@ def main():
         val_buf = PairBuffer()
         fill_buffer_to(val_stream, val_buf, target_pairs=args.val_pairs, quiet=args.quiet_sampling)
         x_val, y_val = val_buf.tensors()
-                # --- Q1 figure: PCA(actions)->2D colored by VQ code (val set) ---
+
+        # --- Q1 figure: PCA(actions)->2D colored by VQ code (val set) ---
         if args.plot_action_pca:
             if latent_source != "vq":
                 print("  [plot] plot_action_pca requested, but latent_source != 'vq' -> skipping (need codes).")
             else:
-                # assign a discrete code index per x_val by nearest codebook embedding
                 codebook = find_codebook_embeddings(trainer.model, expected_dim=x_val.shape[1])  # [K,D]
                 idx_assigned = nearest_code_indices(x_val, codebook, device=device, x_batch=4096)  # [N]
 
                 plot_path = Path(args.plot_path)
                 if not plot_path.is_absolute():
-                    # since you chdir(run_dir), this lands in run_dir by default
                     plot_path = (Path.cwd() / plot_path).resolve()
 
                 plot_action_pca_colored_by_code(
@@ -925,8 +995,10 @@ def main():
                     dpi=args.plot_dpi,
                     max_points=args.plot_max_points,
                     seed=args.plot_seed,
+                    standardize=args.plot_standardize,
+                    K=int(codebook.shape[0]),
+                    cmap=args.plot_cmap,
                 )
-
 
         in_dim = int(x_val.shape[1])
         out_dim = int(y_val.shape[1])
@@ -991,18 +1063,16 @@ def main():
                     f"val_rmse={best['rmse']:.6f}  val_mse={best['mse']:.6f}{extra}"
                 )
 
-            # One clean metric summary
             det_rmse = results["det"]["best_val"]["rmse"]
             ga_rmse = results["gauss"]["best_val"]["rmse"]
             mdn_rmse = results["mdn"]["best_val"]["rmse"]
             print(f"  SUMMARY (val_rmse lower=better): det={det_rmse:.6f}  gauss={ga_rmse:.6f}  mdn={mdn_rmse:.6f}")
-            
+
             if args.checks:
-                # Usually deterministic is the cleanest for diagnostics because predict() is straightforward.
                 run_checks(
                     latent_source=latent_source,
                     trainer_model=trainer.model,
-                    decoder=results["det"]["model"],   # best-state already loaded
+                    decoder=results["det"]["model"],
                     x_val=x_val,
                     y_val=y_val,
                     device=device,
@@ -1010,11 +1080,10 @@ def main():
                     codes_batch=4096,
                     y_batch=4096,
                 )
-                
+
             last_models = {k: v["model"] for k, v in results.items()}
             last_target = target_pairs
 
-            # Optional save at each milestone
             if args.save and args.save_each_size:
                 out_path = ckpt_path if args.overwrite else ckpt_path.with_name(
                     ckpt_path.stem + f"_decoders_{latent_source}_{target_pairs}.pth"
@@ -1041,9 +1110,10 @@ def main():
                 )
                 print(f"  saved decoders to: {out_path}")
 
-        # Save final (largest) decoders by default
         if args.save and last_models is not None and last_target is not None and not args.save_each_size:
-            out_path = ckpt_path if args.overwrite else ckpt_path.with_name(ckpt_path.stem + f"_decoders_{latent_source}.pth")
+            out_path = ckpt_path if args.overwrite else ckpt_path.with_name(
+                ckpt_path.stem + f"_decoders_{latent_source}.pth"
+            )
             meta = {
                 "latent_source": latent_source,
                 "in_dim": in_dim,
