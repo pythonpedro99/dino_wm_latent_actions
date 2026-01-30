@@ -1136,8 +1136,8 @@ def main():
                 )
 
             det_rmse = results["det"]["best_val"]["rmse"]
-            ga_rmse = results["gauss"]["best_val"]["rmse"]
-            mdn_rmse = results["mdn"]["best_val"]["rmse"]
+            ga_rmse = 0 #results["gauss"]["best_val"]["rmse"]
+            mdn_rmse = 0 #results["mdn"]["best_val"]["rmse"]
             print(f"  SUMMARY (val_rmse lower=better): det={det_rmse:.6f}  gauss={ga_rmse:.6f}  mdn={mdn_rmse:.6f}")
 
             if args.checks:
