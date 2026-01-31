@@ -320,6 +320,65 @@ def eval_baseline_rmse(y_train: torch.Tensor, y_val: torch.Tensor) -> float:
     return rmse
 
 
+def eval_baseline_rmse_from_mean(mean_action: torch.Tensor, y_val: torch.Tensor) -> float:
+    """
+    Baseline RMSE using a precomputed mean action vector.
+    """
+    if mean_action.ndim == 1:
+        mean_action = mean_action.unsqueeze(0)
+    if mean_action.ndim != 2 or y_val.ndim != 2:
+        raise ValueError(f"Expected mean_action/y_val [N, A], got {mean_action.shape}, {y_val.shape}")
+    rmse = float((mean_action - y_val).pow(2).mean().sqrt().item())
+    return rmse
+
+
+def iter_pair_batches(
+    stream: MacroPairStream,
+    *,
+    batch_size: int,
+    pairs_per_epoch: int,
+):
+    remaining = pairs_per_epoch
+    buf_p_t = None
+    buf_p_t1 = None
+    buf_z = None
+    buf_y = None
+
+    while remaining > 0:
+        if buf_p_t is None or buf_p_t.shape[0] < batch_size:
+            p_t, p_t1, z, y = stream.next_pair_chunk()
+            buf_p_t = p_t if buf_p_t is None else torch.cat([buf_p_t, p_t], dim=0)
+            buf_p_t1 = p_t1 if buf_p_t1 is None else torch.cat([buf_p_t1, p_t1], dim=0)
+            buf_z = z if buf_z is None else torch.cat([buf_z, z], dim=0)
+            buf_y = y if buf_y is None else torch.cat([buf_y, y], dim=0)
+
+        take = min(batch_size, remaining, buf_p_t.shape[0])
+        xb = buf_p_t[:take]
+        xb1 = buf_p_t1[:take]
+        zb = buf_z[:take]
+        yb = buf_y[:take]
+        remaining -= take
+
+        buf_p_t = buf_p_t[take:]
+        buf_p_t1 = buf_p_t1[take:]
+        buf_z = buf_z[take:]
+        buf_y = buf_y[take:]
+
+        yield xb, xb1, zb, yb
+
+
+def compute_mean_action(stream: MacroPairStream, *, n_pairs: int) -> torch.Tensor:
+    total = None
+    seen = 0
+    while seen < n_pairs:
+        _, _, _, y = stream.next_pair_chunk()
+        take = min(n_pairs - seen, y.shape[0])
+        y = y[:take]
+        total = y.sum(dim=0) if total is None else total + y.sum(dim=0)
+        seen += take
+    return total / max(seen, 1)
+
+
 def train_with_early_stopping(
     model: MacroActionDecoder,
     *,
@@ -421,6 +480,106 @@ def train_with_early_stopping(
     }
 
 
+def train_with_streaming_pairs(
+    model: MacroActionDecoder,
+    *,
+    train_stream: MacroPairStream,
+    train_pairs_per_epoch: int,
+    p_t_val: torch.Tensor,
+    p_t1_val: torch.Tensor,
+    z_val: torch.Tensor,
+    y_val: torch.Tensor,
+    batch_size: int,
+    lr: float,
+    weight_decay: float,
+    device: torch.device,
+    es: EarlyStopConfig,
+    grad_clip: Optional[float],
+    loss_type: str,
+    huber_delta: float,
+) -> Dict[str, object]:
+    model.to(device)
+    optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    best_rmse = float("inf")
+    best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+    best_epoch = 0
+    bad_epochs = 0
+
+    for epoch in range(1, es.max_epochs + 1):
+        model.train()
+        total_loss = 0.0
+        n_batches = 0
+        for xb, xb1, zb, yb in iter_pair_batches(
+            train_stream,
+            batch_size=batch_size,
+            pairs_per_epoch=train_pairs_per_epoch,
+        ):
+            xb = xb.to(device, non_blocking=True)
+            xb1 = xb1.to(device, non_blocking=True)
+            zb = zb.to(device, non_blocking=True)
+            yb = yb.to(device, non_blocking=True)
+
+            optim.zero_grad()
+            pred = model(xb, xb1, zb)
+            loss = _batch_loss(pred, yb, loss_type=loss_type, huber_delta=huber_delta)
+            loss.backward()
+            if grad_clip:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optim.step()
+
+            total_loss += float(loss.item())
+            n_batches += 1
+
+        train_loss = total_loss / max(n_batches, 1)
+        val_rmse = eval_rmse(
+            model,
+            p_t_val,
+            p_t1_val,
+            z_val,
+            y_val,
+            batch_size=batch_size,
+            device=device,
+        )
+
+        improved = val_rmse < best_rmse - es.min_delta
+        if improved:
+            best_rmse = val_rmse
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            best_epoch = epoch
+            bad_epochs = 0
+        else:
+            bad_epochs += 1
+
+        if es.log_every > 0 and (epoch % es.log_every == 0 or improved or bad_epochs >= es.patience):
+            flag = " *" if improved else ""
+            print(
+                f"    [epoch {epoch:4d}]{flag} train_loss={train_loss:.6f} "
+                f"val_rmse={val_rmse:.6f} best={best_rmse:.6f} bad={bad_epochs}/{es.patience}"
+            )
+
+        if bad_epochs >= es.patience:
+            break
+
+    model.load_state_dict(best_state)
+    final_rmse = eval_rmse(
+        model,
+        p_t_val,
+        p_t1_val,
+        z_val,
+        y_val,
+        batch_size=batch_size,
+        device=device,
+    )
+
+    return {
+        "model": model,
+        "best_epoch": best_epoch,
+        "best_rmse": best_rmse,
+        "final_rmse": final_rmse,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description="Train MacroActionDecoder on patch tokens + latent actions.")
     ap.add_argument("--run_dir", type=str, help="Path to Hydra run directory.")
@@ -428,6 +587,7 @@ def main():
     ap.add_argument("--latent_source", type=str, default="continuous", choices=["continuous", "vq"])
     ap.add_argument("--train_pairs", type=int, default=50000)
     ap.add_argument("--val_pairs", type=int, default=10000)
+    ap.add_argument("--stream_train_pairs", action="store_true")
 
     ap.add_argument("--pair_batch_size", type=int, default=512)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -486,17 +646,25 @@ def main():
     p_t_val, p_t1_val, z_val, y_val = val_buf.tensors()
 
     train_stream = MacroPairStream(trainer, split="train", latent_source=args.latent_source, device=device)
-    train_buf = MacroPairBuffer()
-    fill_buffer_to(train_stream, train_buf, target_pairs=args.train_pairs, quiet=args.quiet_sampling)
-    p_t_train, p_t1_train, z_train, y_train = train_buf.tensors()
 
-    if p_t_train.shape[1:] != p_t_val.shape[1:]:
-        raise RuntimeError(f"Token shape mismatch: train {p_t_train.shape} vs val {p_t_val.shape}")
+    if args.stream_train_pairs:
+        token_dim = int(p_t_val.shape[-1])
+        z_dim = int(z_val.shape[-1])
+        out_dim = int(y_val.shape[-1])
+        mean_action = compute_mean_action(train_stream, n_pairs=args.train_pairs)
+        baseline_rmse = eval_baseline_rmse_from_mean(mean_action, y_val)
+    else:
+        train_buf = MacroPairBuffer()
+        fill_buffer_to(train_stream, train_buf, target_pairs=args.train_pairs, quiet=args.quiet_sampling)
+        p_t_train, p_t1_train, z_train, y_train = train_buf.tensors()
 
-    token_dim = int(p_t_train.shape[-1])
-    z_dim = int(z_train.shape[-1])
-    out_dim = int(y_train.shape[-1])
-    baseline_rmse = eval_baseline_rmse(y_train, y_val)
+        if p_t_train.shape[1:] != p_t_val.shape[1:]:
+            raise RuntimeError(f"Token shape mismatch: train {p_t_train.shape} vs val {p_t_val.shape}")
+
+        token_dim = int(p_t_train.shape[-1])
+        z_dim = int(z_train.shape[-1])
+        out_dim = int(y_train.shape[-1])
+        baseline_rmse = eval_baseline_rmse(y_train, y_val)
 
     print(f"Baseline (mean action) val_rmse={baseline_rmse:.6f}")
 
@@ -517,25 +685,44 @@ def main():
     )
     grad_clip = float(args.grad_clip) if args.grad_clip and args.grad_clip > 0 else None
 
-    results = train_with_early_stopping(
-        model,
-        p_t_train=p_t_train,
-        p_t1_train=p_t1_train,
-        z_train=z_train,
-        y_train=y_train,
-        p_t_val=p_t_val,
-        p_t1_val=p_t1_val,
-        z_val=z_val,
-        y_val=y_val,
-        batch_size=args.pair_batch_size,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-        device=device,
-        es=es,
-        grad_clip=grad_clip,
-        loss_type=args.loss_type,
-        huber_delta=args.huber_delta,
-    )
+    if args.stream_train_pairs:
+        results = train_with_streaming_pairs(
+            model,
+            train_stream=train_stream,
+            train_pairs_per_epoch=args.train_pairs,
+            p_t_val=p_t_val,
+            p_t1_val=p_t1_val,
+            z_val=z_val,
+            y_val=y_val,
+            batch_size=args.pair_batch_size,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            device=device,
+            es=es,
+            grad_clip=grad_clip,
+            loss_type=args.loss_type,
+            huber_delta=args.huber_delta,
+        )
+    else:
+        results = train_with_early_stopping(
+            model,
+            p_t_train=p_t_train,
+            p_t1_train=p_t1_train,
+            z_train=z_train,
+            y_train=y_train,
+            p_t_val=p_t_val,
+            p_t1_val=p_t1_val,
+            z_val=z_val,
+            y_val=y_val,
+            batch_size=args.pair_batch_size,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            device=device,
+            es=es,
+            grad_clip=grad_clip,
+            loss_type=args.loss_type,
+            huber_delta=args.huber_delta,
+        )
 
     print("")
     print(
