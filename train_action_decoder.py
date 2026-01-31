@@ -1092,7 +1092,7 @@ def main():
     ap.add_argument(
         "--target",
         type=str,
-        default="action10",
+        default="proxy_dir3",
         choices=["action10", "proxy_r2", "proxy_dir3", "proxy_endbend3"],
         help="Training target: action10 (5x2) or proxy variants.",
     )
@@ -1105,8 +1105,8 @@ def main():
     ap.add_argument("--grad_clip", type=float, default=0.0)
 
     # early stopping
-    ap.add_argument("--max_epochs", type=int, default=2000)
-    ap.add_argument("--patience", type=int, default=30)
+    ap.add_argument("--max_epochs", type=int, default=200)
+    ap.add_argument("--patience", type=int, default=10)
     ap.add_argument("--min_delta", type=float, default=1e-4)
     ap.add_argument("--log_every", type=int, default=1)
 
@@ -1128,7 +1128,7 @@ def main():
     ap.add_argument("--plot_cmap", type=str, default="tab20", help="Matplotlib colormap name (e.g., tab20)")
 
     # proxy diagnostics
-    ap.add_argument("--proxy_kmeans_max_k", type=int, default=0, help="Run k-means sweep on proxy vectors up to K.")
+    ap.add_argument("--proxy_kmeans_max_k", type=int, default=16, help="Run k-means sweep on proxy vectors up to K.")
     ap.add_argument("--proxy_kmeans_iters", type=int, default=20, help="Iterations per k-means run.")
 
     args = ap.parse_args()
