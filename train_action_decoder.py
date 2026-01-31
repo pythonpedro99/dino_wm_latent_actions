@@ -110,26 +110,48 @@ def _extract_latents_and_visuals(
     act,
     *,
     latent_source: str,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     encode_output = model.encode(obs, act)
 
     if "visual_embs" not in encode_output or encode_output["visual_embs"] is None:
         raise KeyError("encode_output['visual_embs'] missing; ensure model.encode returns visual_embs.")
+    if "z" not in encode_output or encode_output["z"] is None:
+        raise KeyError("encode_output['z'] missing; ensure model.encode returns z.")
+    if getattr(model, "predictor", None) is None:
+        raise RuntimeError("model.predictor is required to compute P_t1_hat.")
+
+    z = encode_output["z"]
+    num_pred = int(getattr(model, "num_pred", 1))
+    t_pred = z.shape[1] - num_pred
+    if t_pred <= 0:
+        raise RuntimeError(f"Not enough steps to predict: z.shape[1]={z.shape[1]}, num_pred={num_pred}")
+
+    z_src = z[:, :t_pred]
+    z_pred = model.predict(z_src)
+    pred_obs, _ = model.separate_emb(z_pred)
+
+    if "visual" not in pred_obs or pred_obs["visual"] is None:
+        raise KeyError("pred_obs['visual'] missing after model.separate_emb(z_pred).")
 
     latents = _extract_latents(encode_output, latent_source=latent_source)
-    return latents, encode_output["visual_embs"]
+    p_t = encode_output["visual_embs"][:, :t_pred]
+    p_t1_hat = pred_obs["visual"]
+    return latents, p_t, p_t1_hat
 
 
 def _align_macro_pairs(
-    visual_tokens: torch.Tensor,
+    p_t: torch.Tensor,
+    p_t1_hat: torch.Tensor,
     latents: torch.Tensor,
     actions: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Align P_t, P_t1, z, and a to the same temporal length and flatten into pairs.
+    Align P_t, P_t1_hat, z, and a to the same temporal length and flatten into pairs.
     """
-    if visual_tokens.ndim != 4:
-        raise ValueError(f"Expected visual_tokens [B,T,P,D], got {tuple(visual_tokens.shape)}")
+    if p_t.ndim != 4:
+        raise ValueError(f"Expected p_t [B,T,P,D], got {tuple(p_t.shape)}")
+    if p_t1_hat.ndim != 4:
+        raise ValueError(f"Expected p_t1_hat [B,T,P,D], got {tuple(p_t1_hat.shape)}")
     if latents.ndim != 3:
         raise ValueError(f"Expected latents [B,T,D], got {tuple(latents.shape)}")
     if actions.ndim == 2:
@@ -137,12 +159,9 @@ def _align_macro_pairs(
     if actions.ndim != 3:
         raise ValueError(f"Expected actions [B,T,A], got {tuple(actions.shape)}")
 
-    p_t = visual_tokens[:, :-1]
-    p_t1 = visual_tokens[:, 1:]
-
-    t_pair = min(p_t.shape[1], latents.shape[1], actions.shape[1])
+    t_pair = min(p_t.shape[1], p_t1_hat.shape[1], latents.shape[1], actions.shape[1])
     p_t = p_t[:, :t_pair]
-    p_t1 = p_t1[:, :t_pair]
+    p_t1_hat = p_t1_hat[:, :t_pair]
     latents = latents[:, :t_pair]
     actions = actions[:, :t_pair]
 
@@ -151,15 +170,15 @@ def _align_macro_pairs(
     a_dim = actions.shape[-1]
 
     p_t = p_t.reshape(b * t, p, d).contiguous()
-    p_t1 = p_t1.reshape(b * t, p, d).contiguous()
+    p_t1_hat = p_t1_hat.reshape(b * t, p, d).contiguous()
     latents = latents.reshape(b * t, z_dim).contiguous()
     actions = actions.reshape(b * t, a_dim).contiguous()
 
-    return p_t, p_t1, latents, actions
+    return p_t, p_t1_hat, latents, actions
 
 
 class MacroPairStream:
-    """Stateful stream of (P_t, P_t1, z, a) pairs from Trainer dataloader."""
+    """Stateful stream of (P_t, P_t1_hat, z, a) pairs from Trainer dataloader."""
     def __init__(self, trainer, split: str, latent_source: str, device: torch.device):
         self.trainer = trainer
         self.split = split
@@ -190,18 +209,18 @@ class MacroPairStream:
             obs = obs.to(self.device, non_blocking=True)
         act = act.to(self.device, non_blocking=True)
 
-        latents, visual_tokens = _extract_latents_and_visuals(
+        latents, p_t, p_t1_hat = _extract_latents_and_visuals(
             self.model,
             obs,
             act,
             latent_source=self.latent_source,
         )
 
-        p_t, p_t1, z, y = _align_macro_pairs(visual_tokens, latents, act)
+        p_t, p_t1_hat, z, y = _align_macro_pairs(p_t, p_t1_hat, latents, act)
 
         return (
             p_t.detach().cpu().float(),
-            p_t1.detach().cpu().float(),
+            p_t1_hat.detach().cpu().float(),
             z.detach().cpu().float(),
             y.detach().cpu().float(),
         )
