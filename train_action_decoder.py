@@ -1,14 +1,15 @@
 import os
 import sys
+import json
 import argparse
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, Dataset
 
 from omegaconf import OmegaConf
 from models.action_decoder import MacroActionDecoder
@@ -218,6 +219,7 @@ class MacroPairStream:
 
         p_t, p_t1_hat, z, y = _align_macro_pairs(p_t, p_t1_hat, latents, act)
 
+        # move to CPU for writing; keep float32 here; writer will cast if requested
         return (
             p_t.detach().cpu().float(),
             p_t1_hat.detach().cpu().float(),
@@ -226,48 +228,216 @@ class MacroPairStream:
         )
 
 
-class MacroPairBuffer:
-    """Accumulates macro-action pairs on CPU without quadratic cat overhead."""
-    def __init__(self):
-        self.p_t_chunks: List[torch.Tensor] = []
-        self.p_t1_chunks: List[torch.Tensor] = []
-        self.z_chunks: List[torch.Tensor] = []
-        self.y_chunks: List[torch.Tensor] = []
-        self.n_pairs: int = 0
-        self.token_dim: Optional[int] = None
-        self.z_dim: Optional[int] = None
-        self.action_dim: Optional[int] = None
+# -----------------------------
+# Disk-backed memmap cache (A)
+# -----------------------------
+class MemmapPairWriter:
+    """
+    Disk-backed writer for (p_t, p_t1, z, y) pairs.
+    Writes float16 by default to cut size ~2x.
+    """
+    def __init__(
+        self,
+        root: Path,
+        prefix: str,
+        n_pairs: int,
+        p: int,
+        d: int,
+        z_dim: int,
+        a_dim: int,
+        dtype: np.dtype = np.float16,
+    ):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.prefix = prefix
+        self.n_pairs = int(n_pairs)
+        self.p = int(p)
+        self.d = int(d)
+        self.z_dim = int(z_dim)
+        self.a_dim = int(a_dim)
+        self.dtype = np.dtype(dtype)
+
+        self.meta_path = self.root / f"{prefix}_meta.json"
+        self.p_t_path = self.root / f"{prefix}_p_t.dat"
+        self.p_t1_path = self.root / f"{prefix}_p_t1.dat"
+        self.z_path = self.root / f"{prefix}_z.dat"
+        self.y_path = self.root / f"{prefix}_y.dat"
+
+        self.p_t = np.memmap(self.p_t_path, mode="w+", dtype=self.dtype, shape=(self.n_pairs, self.p, self.d))
+        self.p_t1 = np.memmap(self.p_t1_path, mode="w+", dtype=self.dtype, shape=(self.n_pairs, self.p, self.d))
+        self.z = np.memmap(self.z_path, mode="w+", dtype=self.dtype, shape=(self.n_pairs, self.z_dim))
+        self.y = np.memmap(self.y_path, mode="w+", dtype=self.dtype, shape=(self.n_pairs, self.a_dim))
+
+        self.i = 0  # write cursor
 
     def append(self, p_t: torch.Tensor, p_t1: torch.Tensor, z: torch.Tensor, y: torch.Tensor) -> None:
-        assert p_t.ndim == 3 and p_t1.ndim == 3 and z.ndim == 2 and y.ndim == 2
-        assert p_t.shape == p_t1.shape
-        assert p_t.shape[0] == z.shape[0] == y.shape[0]
-        if self.token_dim is None:
-            self.token_dim = int(p_t.shape[-1])
-            self.z_dim = int(z.shape[1])
-            self.action_dim = int(y.shape[1])
-        self.p_t_chunks.append(p_t)
-        self.p_t1_chunks.append(p_t1)
-        self.z_chunks.append(z)
-        self.y_chunks.append(y)
-        self.n_pairs += int(p_t.shape[0])
+        if self.i >= self.n_pairs:
+            return
+        n = int(p_t.shape[0])
+        j = min(self.i + n, self.n_pairs)
+        take = j - self.i
+        if take <= 0:
+            return
 
-    def tensors(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        p_t = torch.cat(self.p_t_chunks, dim=0) if self.p_t_chunks else torch.empty(0)
-        p_t1 = torch.cat(self.p_t1_chunks, dim=0) if self.p_t1_chunks else torch.empty(0)
-        z = torch.cat(self.z_chunks, dim=0) if self.z_chunks else torch.empty(0)
-        y = torch.cat(self.y_chunks, dim=0) if self.y_chunks else torch.empty(0)
-        return p_t, p_t1, z, y
+        # Cast on CPU just-in-time; only slice what we need.
+        p_t_np = p_t[:take].contiguous().to(torch.float16).cpu().numpy()
+        p_t1_np = p_t1[:take].contiguous().to(torch.float16).cpu().numpy()
+        z_np = z[:take].contiguous().to(torch.float16).cpu().numpy()
+        y_np = y[:take].contiguous().to(torch.float16).cpu().numpy()
+
+        self.p_t[self.i:j] = p_t_np
+        self.p_t1[self.i:j] = p_t1_np
+        self.z[self.i:j] = z_np
+        self.y[self.i:j] = y_np
+
+        self.i = j
+
+    def finalize(self) -> None:
+        self.p_t.flush()
+        self.p_t1.flush()
+        self.z.flush()
+        self.y.flush()
+        meta = {
+            "n_pairs": self.n_pairs,
+            "p": self.p,
+            "d": self.d,
+            "z_dim": self.z_dim,
+            "a_dim": self.a_dim,
+            "dtype": str(self.dtype),
+            "files": {
+                "p_t": self.p_t_path.name,
+                "p_t1": self.p_t1_path.name,
+                "z": self.z_path.name,
+                "y": self.y_path.name,
+            },
+        }
+        with open(self.meta_path, "w") as f:
+            json.dump(meta, f, indent=2)
 
 
-def fill_buffer_to(stream: MacroPairStream, buf: MacroPairBuffer, *, target_pairs: int, quiet: bool) -> None:
-    while buf.n_pairs < target_pairs:
-        p_t, p_t1, z, y = stream.next_pair_chunk()
-        buf.append(p_t, p_t1, z, y)
+class MemmapPairDataset(Dataset):
+    """Reads pairs lazily from disk-backed memmaps."""
+    def __init__(self, root: Path, prefix: str):
+        root = Path(root)
+        meta_path = root / f"{prefix}_meta.json"
+        if not meta_path.exists():
+            raise FileNotFoundError(f"Missing cache meta: {meta_path}")
+
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+
+        self.root = root
+        self.prefix = prefix
+        self.n_pairs = int(meta["n_pairs"])
+        self.p = int(meta["p"])
+        self.d = int(meta["d"])
+        self.z_dim = int(meta["z_dim"])
+        self.a_dim = int(meta["a_dim"])
+        self.dtype = np.dtype(meta["dtype"])
+
+        self.p_t = np.memmap(
+            root / meta["files"]["p_t"],
+            mode="r",
+            dtype=self.dtype,
+            shape=(self.n_pairs, self.p, self.d),
+        )
+        self.p_t1 = np.memmap(
+            root / meta["files"]["p_t1"],
+            mode="r",
+            dtype=self.dtype,
+            shape=(self.n_pairs, self.p, self.d),
+        )
+        self.z = np.memmap(
+            root / meta["files"]["z"],
+            mode="r",
+            dtype=self.dtype,
+            shape=(self.n_pairs, self.z_dim),
+        )
+        self.y = np.memmap(
+            root / meta["files"]["y"],
+            mode="r",
+            dtype=self.dtype,
+            shape=(self.n_pairs, self.a_dim),
+        )
+
+    def __len__(self) -> int:
+        return self.n_pairs
+
+    def __getitem__(self, idx: int):
+        # Return torch tensors (float16 on CPU). We'll cast to float32 on GPU in training/eval.
+        return (
+            torch.from_numpy(self.p_t[idx]),
+            torch.from_numpy(self.p_t1[idx]),
+            torch.from_numpy(self.z[idx]),
+            torch.from_numpy(self.y[idx]),
+        )
+
+
+def build_memmap_cache(
+    stream: MacroPairStream,
+    cache_dir: Path,
+    prefix: str,
+    target_pairs: int,
+    *,
+    quiet: bool,
+    rebuild: bool,
+) -> None:
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = cache_dir / f"{prefix}_meta.json"
+
+    if rebuild:
+        for fp in cache_dir.glob(f"{prefix}_*.dat"):
+            try:
+                fp.unlink()
+            except FileNotFoundError:
+                pass
+        try:
+            meta_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    if meta_path.exists():
         if not quiet:
-            print(f"  collected {buf.n_pairs}/{target_pairs} pairs")
+            print(f"[cache] {prefix}: exists ({meta_path})")
+        return
+
+    # probe to get shapes
+    p_t, p_t1, z, y = stream.next_pair_chunk()
+    p = int(p_t.shape[1])
+    d = int(p_t.shape[2])
+    z_dim = int(z.shape[1])
+    a_dim = int(y.shape[1])
+
+    writer = MemmapPairWriter(
+        cache_dir,
+        prefix=prefix,
+        n_pairs=target_pairs,
+        p=p,
+        d=d,
+        z_dim=z_dim,
+        a_dim=a_dim,
+        dtype=np.float16,
+    )
+
+    writer.append(p_t, p_t1, z, y)
+    if not quiet:
+        print(f"[cache] {prefix}: wrote {writer.i}/{target_pairs}")
+
+    while writer.i < target_pairs:
+        p_t, p_t1, z, y = stream.next_pair_chunk()
+        writer.append(p_t, p_t1, z, y)
+        if not quiet:
+            print(f"[cache] {prefix}: wrote {writer.i}/{target_pairs}")
+
+    writer.finalize()
+    if not quiet:
+        print(f"[cache] {prefix}: done -> {cache_dir}")
 
 
+# -----------------------------
+# Training / Eval
+# -----------------------------
 @dataclass
 class EarlyStopConfig:
     max_epochs: int
@@ -285,16 +455,15 @@ def _batch_loss(pred: torch.Tensor, target: torch.Tensor, loss_type: str, huber_
 
 
 @torch.no_grad()
-def eval_rmse(
+def eval_rmse_loader(
     model: MacroActionDecoder,
-    p_t: torch.Tensor,
-    p_t1: torch.Tensor,
-    z: torch.Tensor,
-    y: torch.Tensor,
+    loader: DataLoader,
     *,
-    batch_size: int,
     device: torch.device,
 ) -> float:
+    """
+    Streaming RMSE: does NOT store all predictions in RAM (fixes eval RAM spikes).
+    """
     model.eval()
     preds = []
     n = p_t.shape[0]
@@ -323,14 +492,8 @@ def eval_baseline_rmse(y_train: torch.Tensor, y_val: torch.Tensor) -> float:
 def train_with_early_stopping(
     model: MacroActionDecoder,
     *,
-    p_t_train: torch.Tensor,
-    p_t1_train: torch.Tensor,
-    z_train: torch.Tensor,
-    y_train: torch.Tensor,
-    p_t_val: torch.Tensor,
-    p_t1_val: torch.Tensor,
-    z_val: torch.Tensor,
-    y_val: torch.Tensor,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
     batch_size: int,
     lr: float,
     weight_decay: float,
@@ -343,9 +506,6 @@ def train_with_early_stopping(
     model.to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    train_ds = TensorDataset(p_t_train, p_t1_train, z_train, y_train)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False)
-
     best_rmse = float("inf")
     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
     best_epoch = 0
@@ -355,13 +515,14 @@ def train_with_early_stopping(
         model.train()
         total_loss = 0.0
         n_batches = 0
-        for xb, xb1, zb, yb in train_loader:
-            xb = xb.to(device, non_blocking=True)
-            xb1 = xb1.to(device, non_blocking=True)
-            zb = zb.to(device, non_blocking=True)
-            yb = yb.to(device, non_blocking=True)
 
-            optim.zero_grad()
+        for xb, xb1, zb, yb in train_loader:
+            xb = xb.to(device, non_blocking=True, dtype=torch.float32)
+            xb1 = xb1.to(device, non_blocking=True, dtype=torch.float32)
+            zb = zb.to(device, non_blocking=True, dtype=torch.float32)
+            yb = yb.to(device, non_blocking=True, dtype=torch.float32)
+
+            optim.zero_grad(set_to_none=True)
             pred = model(xb, xb1, zb)
             loss = _batch_loss(pred, yb, loss_type=loss_type, huber_delta=huber_delta)
             loss.backward()
@@ -373,15 +534,8 @@ def train_with_early_stopping(
             n_batches += 1
 
         train_loss = total_loss / max(n_batches, 1)
-        val_rmse = eval_rmse(
-            model,
-            p_t_val,
-            p_t1_val,
-            z_val,
-            y_val,
-            batch_size=batch_size,
-            device=device,
-        )
+
+        val_rmse = eval_rmse_loader(model, val_loader, device=device)
 
         improved = val_rmse < best_rmse - es.min_delta
         if improved:
@@ -403,15 +557,7 @@ def train_with_early_stopping(
             break
 
     model.load_state_dict(best_state)
-    final_rmse = eval_rmse(
-        model,
-        p_t_val,
-        p_t1_val,
-        z_val,
-        y_val,
-        batch_size=batch_size,
-        device=device,
-    )
+    final_rmse = eval_rmse_loader(model, val_loader, device=device)
 
     return {
         "model": model,
@@ -422,7 +568,7 @@ def train_with_early_stopping(
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Train MacroActionDecoder on patch tokens + latent actions.")
+    ap = argparse.ArgumentParser(description="Train MacroActionDecoder on patch tokens + latent actions (disk-backed cache).")
     ap.add_argument("--run_dir", type=str, help="Path to Hydra run directory.")
     ap.add_argument("--ckpt", type=str, required=True, help="Checkpoint filename or absolute path.")
     ap.add_argument("--latent_source", type=str, default="continuous", choices=["continuous", "vq"])
@@ -446,6 +592,12 @@ def main():
     ap.add_argument("--disable_z", action="store_true")
 
     ap.add_argument("--quiet_sampling", action="store_true")
+
+    # cache / dataloader knobs
+    ap.add_argument("--pair_cache_dir", type=str, default="macro_pair_cache", help="Directory under run_dir to store memmap cache.")
+    ap.add_argument("--rebuild_cache", action="store_true", help="Delete and rebuild cached pairs.")
+    ap.add_argument("--loader_workers", type=int, default=2, help="DataLoader workers for memmap dataset.")
+    ap.add_argument("--no_pin_memory", action="store_true", help="Disable pin_memory for memmap loaders.")
 
     args = ap.parse_args()
 
@@ -480,11 +632,23 @@ def main():
     print(f"device: {device}")
     print("")
 
-    val_stream = MacroPairStream(trainer, split="valid", latent_source=args.latent_source, device=device)
-    val_buf = MacroPairBuffer()
-    fill_buffer_to(val_stream, val_buf, target_pairs=args.val_pairs, quiet=args.quiet_sampling)
-    p_t_val, p_t1_val, z_val, y_val = val_buf.tensors()
+    pair_cache_dir = Path(args.pair_cache_dir)
+    cache_dir = pair_cache_dir if pair_cache_dir.is_absolute() else (run_dir / pair_cache_dir).resolve()
 
+    pin_memory = (not args.no_pin_memory) and torch.cuda.is_available()
+
+    # Build / reuse validation cache
+    val_stream = MacroPairStream(trainer, split="valid", latent_source=args.latent_source, device=device)
+    build_memmap_cache(
+        val_stream,
+        cache_dir=cache_dir,
+        prefix="valid",
+        target_pairs=int(args.val_pairs),
+        quiet=args.quiet_sampling,
+        rebuild=bool(args.rebuild_cache),
+    )
+
+    # Build / reuse train cache
     train_stream = MacroPairStream(trainer, split="train", latent_source=args.latent_source, device=device)
     train_buf = MacroPairBuffer()
     fill_buffer_to(train_stream, train_buf, target_pairs=args.train_pairs, quiet=args.quiet_sampling)
@@ -499,6 +663,50 @@ def main():
     baseline_rmse = eval_baseline_rmse(y_train, y_val)
 
     print(f"Baseline (mean action) val_rmse={baseline_rmse:.6f}")
+    build_memmap_cache(
+        train_stream,
+        cache_dir=cache_dir,
+        prefix="train",
+        target_pairs=int(args.train_pairs),
+        quiet=args.quiet_sampling,
+        rebuild=bool(args.rebuild_cache),
+    )
+
+    # Create datasets/loaders from memmaps
+    val_ds = MemmapPairDataset(cache_dir, "valid")
+    train_ds = MemmapPairDataset(cache_dir, "train")
+
+    # Basic shape consistency check (cheap)
+    if val_ds.p != train_ds.p or val_ds.d != train_ds.d or val_ds.z_dim != train_ds.z_dim or val_ds.a_dim != train_ds.a_dim:
+        raise RuntimeError(
+            "Token/latent/action shape mismatch between train and valid caches:\n"
+            f"  train: P={train_ds.p}, D={train_ds.d}, z_dim={train_ds.z_dim}, a_dim={train_ds.a_dim}\n"
+            f"  valid: P={val_ds.p}, D={val_ds.d}, z_dim={val_ds.z_dim}, a_dim={val_ds.a_dim}"
+        )
+
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=int(args.pair_batch_size),
+        shuffle=False,
+        drop_last=False,
+        num_workers=int(args.loader_workers),
+        pin_memory=pin_memory,
+        persistent_workers=(int(args.loader_workers) > 0),
+    )
+
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=int(args.pair_batch_size),
+        shuffle=True,
+        drop_last=False,
+        num_workers=int(args.loader_workers),
+        pin_memory=pin_memory,
+        persistent_workers=(int(args.loader_workers) > 0),
+    )
+
+    token_dim = int(train_ds.d)
+    z_dim = int(train_ds.z_dim)
+    out_dim = int(train_ds.a_dim)
 
     model = MacroActionDecoder(
         token_dim=token_dim,
@@ -519,22 +727,16 @@ def main():
 
     results = train_with_early_stopping(
         model,
-        p_t_train=p_t_train,
-        p_t1_train=p_t1_train,
-        z_train=z_train,
-        y_train=y_train,
-        p_t_val=p_t_val,
-        p_t1_val=p_t1_val,
-        z_val=z_val,
-        y_val=y_val,
-        batch_size=args.pair_batch_size,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        batch_size=int(args.pair_batch_size),
+        lr=float(args.lr),
+        weight_decay=float(args.weight_decay),
         device=device,
         es=es,
         grad_clip=grad_clip,
-        loss_type=args.loss_type,
-        huber_delta=args.huber_delta,
+        loss_type=str(args.loss_type),
+        huber_delta=float(args.huber_delta),
     )
 
     print("")
