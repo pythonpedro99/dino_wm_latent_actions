@@ -70,15 +70,16 @@ def add_repo_to_syspath():
             break
 
 
-def _extract_latents(model, obs, act, latent_source: str) -> torch.Tensor:
+def _extract_latents(
+    encode_output: Dict[str, torch.Tensor],
+    latent_source: str,
+) -> torch.Tensor:
     """
     model.encode(obs, act) returns dict-like outputs.
     latent_source:
       - "continuous": expects encode_output["latent_actions"]
       - "vq": expects encode_output["quantized_latent_actions"] (or common aliases)
     """
-    encode_output = model.encode(obs, act)
-
     if latent_source == "continuous":
         keys = ["latent_actions"]
     elif latent_source == "vq":
@@ -103,11 +104,20 @@ def _extract_latents(model, obs, act, latent_source: str) -> torch.Tensor:
     return lat
 
 
-def _extract_visual_tokens(model, obs, act) -> torch.Tensor:
+def _extract_latents_and_visuals(
+    model,
+    obs,
+    act,
+    *,
+    latent_source: str,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     encode_output = model.encode(obs, act)
+
     if "visual_embs" not in encode_output or encode_output["visual_embs"] is None:
         raise KeyError("encode_output['visual_embs'] missing; ensure model.encode returns visual_embs.")
-    return encode_output["visual_embs"]
+
+    latents = _extract_latents(encode_output, latent_source=latent_source)
+    return latents, encode_output["visual_embs"]
 
 
 def _align_macro_pairs(
@@ -180,8 +190,12 @@ class MacroPairStream:
             obs = obs.to(self.device, non_blocking=True)
         act = act.to(self.device, non_blocking=True)
 
-        visual_tokens = _extract_visual_tokens(self.model, obs, act)
-        latents = _extract_latents(self.model, obs, act, latent_source=self.latent_source)
+        latents, visual_tokens = _extract_latents_and_visuals(
+            self.model,
+            obs,
+            act,
+            latent_source=self.latent_source,
+        )
 
         p_t, p_t1, z, y = _align_macro_pairs(visual_tokens, latents, act)
 
