@@ -412,7 +412,7 @@ def train_with_early_stopping(
 
 def main():
     ap = argparse.ArgumentParser(description="Train MacroActionDecoder on patch tokens + latent actions.")
-    ap.add_argument("run_dir", type=str, help="Path to Hydra run directory.")
+    ap.add_argument("--run_dir", type=str, help="Path to Hydra run directory.")
     ap.add_argument("--ckpt", type=str, required=True, help="Checkpoint filename or absolute path.")
     ap.add_argument("--latent_source", type=str, default="continuous", choices=["continuous", "vq"])
     ap.add_argument("--train_pairs", type=int, default=50000)
