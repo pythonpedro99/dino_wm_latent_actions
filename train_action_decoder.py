@@ -465,28 +465,20 @@ def eval_rmse_loader(
     Streaming RMSE: does NOT store all predictions in RAM (fixes eval RAM spikes).
     """
     model.eval()
-    preds = []
-    n = p_t.shape[0]
-    for i in range(0, n, batch_size):
-        xb = p_t[i : i + batch_size].to(device, non_blocking=True)
-        xb1 = p_t1[i : i + batch_size].to(device, non_blocking=True)
-        zb = z[i : i + batch_size].to(device, non_blocking=True)
-        pred = model(xb, xb1, zb).detach().cpu()
-        preds.append(pred)
-    pred_all = torch.cat(preds, dim=0)
-    rmse = float((pred_all - y).pow(2).mean().sqrt().item())
-    return rmse
+    sse = 0.0
+    n_el = 0
+    for xb, xb1, zb, yb in loader:
+        xb = xb.to(device, non_blocking=True, dtype=torch.float32)
+        xb1 = xb1.to(device, non_blocking=True, dtype=torch.float32)
+        zb = zb.to(device, non_blocking=True, dtype=torch.float32)
+        yb = yb.to(device, non_blocking=True, dtype=torch.float32)
 
+        pred = model(xb, xb1, zb)
+        diff = pred - yb
+        sse += float(diff.pow(2).sum().item())
+        n_el += int(diff.numel())
 
-def eval_baseline_rmse(y_train: torch.Tensor, y_val: torch.Tensor) -> float:
-    """
-    Baseline RMSE using the per-dimension mean action from the training set.
-    """
-    if y_train.ndim != 2 or y_val.ndim != 2:
-        raise ValueError(f"Expected y_train/y_val [N, A], got {y_train.shape}, {y_val.shape}")
-    mean_action = y_train.mean(dim=0, keepdim=True)
-    rmse = float((mean_action - y_val).pow(2).mean().sqrt().item())
-    return rmse
+    return float((sse / max(n_el, 1)) ** 0.5)
 
 
 def train_with_early_stopping(
@@ -650,19 +642,6 @@ def main():
 
     # Build / reuse train cache
     train_stream = MacroPairStream(trainer, split="train", latent_source=args.latent_source, device=device)
-    train_buf = MacroPairBuffer()
-    fill_buffer_to(train_stream, train_buf, target_pairs=args.train_pairs, quiet=args.quiet_sampling)
-    p_t_train, p_t1_train, z_train, y_train = train_buf.tensors()
-
-    if p_t_train.shape[1:] != p_t_val.shape[1:]:
-        raise RuntimeError(f"Token shape mismatch: train {p_t_train.shape} vs val {p_t_val.shape}")
-
-    token_dim = int(p_t_train.shape[-1])
-    z_dim = int(z_train.shape[-1])
-    out_dim = int(y_train.shape[-1])
-    baseline_rmse = eval_baseline_rmse(y_train, y_val)
-
-    print(f"Baseline (mean action) val_rmse={baseline_rmse:.6f}")
     build_memmap_cache(
         train_stream,
         cache_dir=cache_dir,
