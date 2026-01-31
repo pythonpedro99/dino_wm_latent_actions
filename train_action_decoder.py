@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from omegaconf import OmegaConf
-from models.action_decoder import DeterministicActionDecoder5Head, GaussianActionDecoder5Head, MDNActionDecoder5Head, DeterministicProxyDecoder
+from models.action_decoder import DeterministicActionDecoder5Head, DeterministicProxyDecoder
 
 # hard-disable wandb (Trainer calls wandb.init)
 os.environ["WANDB_MODE"] = "disabled"
@@ -238,8 +238,105 @@ def fill_buffer_to(stream: PairStream, buf: PairBuffer, target_pairs: int, *, qu
 # Training / evaluation
 # =============================================================================
 
+def _standardize_targets(
+    y_train: torch.Tensor,
+    y_val: torch.Tensor,
+    *,
+    target: str,
+    eps: float = 1e-8,
+) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
+    if target == "action10":
+        return y_train, y_val, None
+
+    if target == "proxy_dir3":
+        mean_dir = y_train[:, :2].mean(dim=0, keepdim=True)
+        std_dir = y_train[:, :2].std(dim=0, unbiased=False, keepdim=True).clamp(min=eps)
+        mean_mag = y_train[:, 2:].mean(dim=0, keepdim=True)
+        std_mag = y_train[:, 2:].std(dim=0, unbiased=False, keepdim=True).clamp(min=eps)
+        mean = torch.cat([mean_dir, mean_mag], dim=-1)
+        std = torch.cat([std_dir, std_mag], dim=-1)
+    else:
+        mean = y_train.mean(dim=0, keepdim=True)
+        std = y_train.std(dim=0, unbiased=False, keepdim=True).clamp(min=eps)
+
+    y_train_std = (y_train - mean) / std
+    y_val_std = (y_val - mean) / std
+    stats = {"mean": mean.squeeze(0), "std": std.squeeze(0)}
+    return y_train_std, y_val_std, stats
+
+
+def _unstandardize(y: torch.Tensor, stats: Dict[str, torch.Tensor]) -> torch.Tensor:
+    mean = stats["mean"].to(y.device, non_blocking=True)
+    std = stats["std"].to(y.device, non_blocking=True)
+    return y * std + mean
+
+
+def print_baseline_rmse(y_train: torch.Tensor, y_val: torch.Tensor) -> float:
+    mu = y_train.mean(dim=0, keepdim=True)
+    rmse_baseline = ((y_val - mu).pow(2).mean().sqrt()).item()
+    print("baseline_rmse(mean predictor):", rmse_baseline)
+    return float(rmse_baseline)
+
+
 @torch.no_grad()
-def eval_quality(model: nn.Module, x: torch.Tensor, y: torch.Tensor, *, batch_size: int, device: torch.device) -> Dict[str, float]:
+def kmeans_elbow_sweep(
+    P: torch.Tensor,
+    *,
+    max_k: int,
+    iters: int = 20,
+    seed: int = 0,
+) -> List[Tuple[int, float, float]]:
+    """
+    Runs a simple k-means sweep on standardized proxy vectors.
+    Returns list of (k, sse, ev) where ev = 1 - sse/total_var.
+    """
+    if max_k < 1:
+        return []
+
+    P = P.float()
+    P0 = P - P.mean(dim=0, keepdim=True)
+    P0 = P0 / (P0.std(dim=0, keepdim=True) + 1e-8)
+
+    N = P0.shape[0]
+    total_var = float((P0.pow(2).sum()).item())
+    g = torch.Generator(device=P0.device)
+    g.manual_seed(int(seed))
+
+    out: List[Tuple[int, float, float]] = []
+    for k in range(1, max_k + 1):
+        if k >= N:
+            break
+        perm = torch.randperm(N, generator=g, device=P0.device)
+        centers = P0.index_select(0, perm[:k]).clone()
+
+        for _ in range(int(iters)):
+            d2 = torch.cdist(P0, centers).pow(2)
+            labels = d2.argmin(dim=1)
+            for i in range(k):
+                mask = labels == i
+                if mask.any():
+                    centers[i] = P0[mask].mean(dim=0)
+                else:
+                    centers[i] = P0[perm[i % N]]
+
+        d2_final = torch.cdist(P0, centers).pow(2)
+        min_d2, _ = d2_final.min(dim=1)
+        sse = float(min_d2.sum().item())
+        ev = 1.0 - (sse / max(total_var, 1e-12))
+        out.append((k, sse, ev))
+    return out
+
+
+@torch.no_grad()
+def eval_quality(
+    model: nn.Module,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    batch_size: int,
+    device: torch.device,
+    target_stats: Optional[Dict[str, torch.Tensor]] = None,
+) -> Dict[str, float]:
     """
     One clean quality metric across all models:
       - rmse: sqrt(mean((a_hat - a)^2))
@@ -258,6 +355,8 @@ def eval_quality(model: nn.Module, x: torch.Tensor, y: torch.Tensor, *, batch_si
         preds.append(pred)
 
     y_pred = torch.cat(preds, dim=0)
+    if target_stats is not None:
+        y_pred = _unstandardize(y_pred, target_stats)
     err = y_pred - y
     mse = float((err.pow(2).mean()).item())
     rmse = float(math.sqrt(mse))
@@ -301,6 +400,8 @@ def train_with_early_stopping(
     device: torch.device,
     es: EarlyStopConfig,
     grad_clip: Optional[float] = None,
+    loss_fn: Optional[callable] = None,
+    target_stats: Optional[Dict[str, torch.Tensor]] = None,
 ) -> Dict[str, object]:
     """
     Trains model.loss(z,a) with AdamW, early-stopping on val RMSE.
@@ -320,7 +421,14 @@ def train_with_early_stopping(
     best_epoch = 0
     bad_epochs = 0
 
-    val0 = eval_quality(model, x_val, y_val, batch_size=batch_size, device=device)
+    val0 = eval_quality(
+        model,
+        x_val,
+        y_val,
+        batch_size=batch_size,
+        device=device,
+        target_stats=target_stats,
+    )
     best_rmse = val0["rmse"]
     best_state = copy.deepcopy(model.state_dict())
     best_epoch = 0
@@ -341,7 +449,10 @@ def train_with_early_stopping(
             yb = yb.to(device, non_blocking=True)
 
             opt.zero_grad(set_to_none=True)
-            loss = model.loss(xb, yb)
+            if loss_fn is None:
+                loss = model.loss(xb, yb)
+            else:
+                loss = loss_fn(model, xb, yb)
             loss.backward()
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
@@ -352,7 +463,14 @@ def train_with_early_stopping(
 
         train_loss = total_loss / max(n_batches, 1)
 
-        val = eval_quality(model, x_val, y_val, batch_size=batch_size, device=device)
+        val = eval_quality(
+            model,
+            x_val,
+            y_val,
+            batch_size=batch_size,
+            device=device,
+            target_stats=target_stats,
+        )
         val_rmse = val["rmse"]
 
         improved = (best_rmse - val_rmse) > es.min_delta
@@ -376,7 +494,14 @@ def train_with_early_stopping(
             break
 
     model.load_state_dict(best_state)
-    best_val = eval_quality(model, x_val, y_val, batch_size=batch_size, device=device)
+    best_val = eval_quality(
+        model,
+        x_val,
+        y_val,
+        batch_size=batch_size,
+        device=device,
+        target_stats=target_stats,
+    )
 
     return {
         "model": model,
@@ -393,7 +518,6 @@ def build_decoders(
     hidden_dim: int,
     n_layers: int,
     n_primitives: int,
-    mdn_components: int,
     target: str,
 ):
     if target == "action10":
@@ -402,8 +526,6 @@ def build_decoders(
         )
         return {
             "det": DeterministicActionDecoder5Head(in_dim=in_dim, hidden_dim=hidden_dim, n_layers=n_layers, n_primitives=n_primitives),
-            "gauss": GaussianActionDecoder5Head(in_dim=in_dim, hidden_dim=hidden_dim, n_layers=n_layers, n_primitives=n_primitives),
-            "mdn": MDNActionDecoder5Head(in_dim=in_dim, hidden_dim=hidden_dim, n_layers=n_layers, n_primitives=n_primitives, n_components=mdn_components),
         }
 
     # proxy targets: generic vector decoders
@@ -433,7 +555,7 @@ def save_decoders_into_ckpt(
 ):
     """
     Writes a new checkpoint file with an additional key:
-      action_decoders_<latent_source> = {det, gauss, mdn, meta, train_pairs}
+      action_decoders_<latent_source> = {det, meta, train_pairs}
     """
     ckpt = torch.load(ckpt_path, map_location="cpu")
     key = f"action_decoders_{latent_source}"
@@ -441,8 +563,6 @@ def save_decoders_into_ckpt(
         "train_pairs": int(train_pairs),
         "meta": meta,
         "det": decoders["det"].state_dict(),
-        "gauss": decoders["gauss"].state_dict(),
-        "mdn": decoders["mdn"].state_dict(),
     }
     torch.save(ckpt, out_path)
 
@@ -477,6 +597,19 @@ def per_head_rmse_from_preds(y_pred: torch.Tensor, y_true: torch.Tensor) -> Dict
     out = {"rmse": overall_rmse}
     for h in range(5):
         out[f"rmse_head{h+1}"] = float(head_rmse[h].item())
+    return out
+
+
+@torch.no_grad()
+def proxy_rmse_from_preds(y_pred: torch.Tensor, y_true: torch.Tensor, *, target: str) -> Dict[str, float]:
+    err = y_pred - y_true
+    rmse = float(err.pow(2).mean().sqrt().item())
+    out = {"rmse": rmse}
+    if target == "proxy_dir3":
+        rmse_dir = float(err[:, :2].pow(2).mean().sqrt().item())
+        rmse_mag = float(err[:, 2:].pow(2).mean().sqrt().item())
+        out["rmse_dir"] = rmse_dir
+        out["rmse_mag"] = rmse_mag
     return out
 
 
@@ -650,6 +783,8 @@ def run_checks(
     y_val: torch.Tensor,
     device: torch.device,
     pred_batch: int,
+    target: str,
+    target_stats: Optional[Dict[str, torch.Tensor]] = None,
     codes_batch: int = 4096,
     y_batch: int = 4096,
 ) -> None:
@@ -661,18 +796,29 @@ def run_checks(
 
     # 1) Decoder predictions on val + per-head RMSE + normalization by target std
     y_pred = predict_all(decoder, x_val, batch_size=pred_batch, device=device)
-    rmse = per_head_rmse_from_preds(y_pred, y_val)
+    if target_stats is not None:
+        y_pred = _unstandardize(y_pred, target_stats)
 
-    y_std = y_val.std(dim=0, unbiased=False)  # [10]
+    y_std = y_val.std(dim=0, unbiased=False)
     nrmse = float(((y_pred - y_val).pow(2).mean().sqrt() / (y_std.mean().clamp(min=1e-8))).item())
 
-    print(
-        f"  [checks] pred rmse={rmse['rmse']:.4f}  nrmse~={nrmse:.4f}  "
-        + "  ".join([f"h{i}={rmse[f'rmse_head{i}']:.4f}" for i in range(1, 6)])
-    )
+    if target == "action10":
+        rmse = per_head_rmse_from_preds(y_pred, y_val)
+        print(
+            f"  [checks] pred rmse={rmse['rmse']:.4f}  nrmse~={nrmse:.4f}  "
+            + "  ".join([f"h{i}={rmse[f'rmse_head{i}']:.4f}" for i in range(1, 6)])
+        )
+    else:
+        rmse = proxy_rmse_from_preds(y_pred, y_val, target=target)
+        extra = ""
+        if target == "proxy_dir3":
+            extra = f"  dir_rmse={rmse['rmse_dir']:.4f}  mag_rmse={rmse['rmse_mag']:.4f}"
+        print(
+            f"  [checks] pred rmse={rmse['rmse']:.4f}  nrmse~={nrmse:.4f}{extra}"
+        )
 
     # 2) VQ-specific checks
-    if latent_source == "vq":
+    if latent_source == "vq" and target == "action10":
         codebook = find_codebook_embeddings(trainer_model, expected_dim=x_val.shape[1])  # [K,32]
         K = int(codebook.shape[0])
 
@@ -718,6 +864,8 @@ def run_checks(
             f"  [checks] within-code dispersion std_all={disp['within_std_all']:.4f}  "
             + "  ".join([f"h{i}={disp[f'within_std_head{i}']:.4f}" for i in range(1, 6)])
         )
+    elif latent_source == "vq" and target != "action10":
+        print("  [checks] vq codebook checks are action-only; skipping for proxy targets.")
 
     print("  [checks] done.")
 
@@ -940,15 +1088,14 @@ def main():
     ap.add_argument("--hidden_dim", type=int, default=256)
     ap.add_argument("--n_layers", type=int, default=4)
     ap.add_argument("--n_primitives", type=int, default=5)
-    ap.add_argument("--mdn_components", type=int, default=5)
     ap.add_argument("--checks", action="store_true")
     ap.add_argument(
-    "--target",
-    type=str,
-    default="action10",
-    choices=["action10", "proxy_r2", "proxy_dir3", "proxy_endbend3"],
-    help="Training target: action10 (5x2) or proxy variants."
-)
+        "--target",
+        type=str,
+        default="action10",
+        choices=["action10", "proxy_r2", "proxy_dir3", "proxy_endbend3"],
+        help="Training target: action10 (5x2) or proxy variants.",
+    )
 
 
     # training hyperparams
@@ -979,6 +1126,10 @@ def main():
     ap.add_argument("--plot_seed", type=int, default=0)
     ap.add_argument("--plot_standardize", action="store_true", help="Standardize per action dim before PCA")
     ap.add_argument("--plot_cmap", type=str, default="tab20", help="Matplotlib colormap name (e.g., tab20)")
+
+    # proxy diagnostics
+    ap.add_argument("--proxy_kmeans_max_k", type=int, default=0, help="Run k-means sweep on proxy vectors up to K.")
+    ap.add_argument("--proxy_kmeans_iters", type=int, default=20, help="Iterations per k-means run.")
 
     args = ap.parse_args()
 
@@ -1041,7 +1192,18 @@ def main():
         fill_buffer_to(val_stream, val_buf, target_pairs=args.val_pairs, quiet=args.quiet_sampling)
         
         x_val, y_val_action = val_buf.tensors()
-        y_val = make_target(y_val_action, target=args.target, n_primitives=args.n_primitives)
+        y_val_raw = make_target(y_val_action, target=args.target, n_primitives=args.n_primitives)
+        if args.target != "action10" and args.proxy_kmeans_max_k > 0:
+            sweep = kmeans_elbow_sweep(
+                y_val_raw,
+                max_k=int(args.proxy_kmeans_max_k),
+                iters=int(args.proxy_kmeans_iters),
+                seed=int(args.plot_seed),
+            )
+            if sweep:
+                print("  [proxy] k-means sweep (standardized proxy vectors):")
+                for k, sse, ev in sweep:
+                    print(f"    k={k:2d}  sse={sse:.4f}  ev={ev:.4f}")
 
 
         # --- Q1 figure: PCA(actions)->2D colored by VQ code (val set) ---
@@ -1069,10 +1231,10 @@ def main():
                 )
 
         in_dim = int(x_val.shape[1])
-        out_dim = int(y_val.shape[1])
+        out_dim = int(y_val_raw.shape[1])
 
         print(f"  val: pairs={x_val.shape[0]}  in_dim={in_dim}  out_dim={out_dim}")
-        if out_dim != 2 * args.n_primitives:
+        if args.target == "action10" and out_dim != 2 * args.n_primitives:
             print(f"  WARNING: out_dim={out_dim} but n_primitives={args.n_primitives} -> expected {2*args.n_primitives}")
 
         # 2) Incrementally sample train pairs and train models at milestones
@@ -1085,25 +1247,31 @@ def main():
         for target_pairs in train_pair_targets:
             fill_buffer_to(train_stream, train_buf, target_pairs=target_pairs, quiet=args.quiet_sampling)
             x_train, y_train_action = train_buf.tensors()
-            y_train = make_target(y_train_action, target=args.target, n_primitives=args.n_primitives)
+            y_train_raw = make_target(y_train_action, target=args.target, n_primitives=args.n_primitives)
+            y_train, _y_val_scaled, target_stats = _standardize_targets(
+                y_train_raw,
+                y_val_raw,
+                target=args.target,
+            )
 
 
             if x_train.shape[1] != in_dim or y_train.shape[1] != out_dim:
                 raise RuntimeError(
-                    f"Dim mismatch: train x/y={x_train.shape}/{y_train.shape}, val x/y={x_val.shape}/{y_val.shape}"
+                    f"Dim mismatch: train x/y={x_train.shape}/{y_train.shape}, val x/y={x_val.shape}/{y_val_raw.shape}"
                 )
 
             print("-" * 90)
             print(f"  [train_pairs={target_pairs}] train_pairs={x_train.shape[0]}  batch_size={args.pair_batch_size}")
 
-            # Train all three models (fresh for this milestone)
+            print_baseline_rmse(y_train_raw, y_val_raw)
+
+            # Train deterministic decoder (fresh for this milestone)
             models = build_decoders(
                 in_dim=in_dim,
                 out_dim=out_dim,
                 hidden_dim=args.hidden_dim,
                 n_layers=args.n_layers,
                 n_primitives=args.n_primitives,
-                mdn_components=args.mdn_components,
                 target=args.target,
             )
 
@@ -1111,6 +1279,14 @@ def main():
                 m.to(device)
 
             results = {}
+            def proxy_dir_loss(model: nn.Module, xb: torch.Tensor, yb: torch.Tensor) -> torch.Tensor:
+                pred = model.forward(xb)
+                loss_dir = F.mse_loss(pred[:, :2], yb[:, :2], reduction="mean")
+                loss_mag = F.mse_loss(pred[:, 2:], yb[:, 2:], reduction="mean")
+                return loss_dir + loss_mag
+
+            loss_fn = proxy_dir_loss if args.target == "proxy_dir3" else None
+
             for name, model in models.items():
                 print(f"  -> training {name} ...")
                 res = train_with_early_stopping(
@@ -1118,13 +1294,15 @@ def main():
                     x_train=x_train,
                     y_train=y_train,
                     x_val=x_val,
-                    y_val=y_val,
+                    y_val=y_val_raw,
                     batch_size=args.pair_batch_size,
                     lr=args.lr,
                     weight_decay=args.weight_decay,
                     device=device,
                     es=es,
                     grad_clip=grad_clip,
+                    loss_fn=loss_fn,
+                    target_stats=target_stats,
                 )
                 results[name] = res
 
@@ -1136,9 +1314,7 @@ def main():
                 )
 
             det_rmse = results["det"]["best_val"]["rmse"]
-            ga_rmse = 0 #results["gauss"]["best_val"]["rmse"]
-            mdn_rmse = 0 #results["mdn"]["best_val"]["rmse"]
-            print(f"  SUMMARY (val_rmse lower=better): det={det_rmse:.6f}  gauss={ga_rmse:.6f}  mdn={mdn_rmse:.6f}")
+            print(f"  SUMMARY (val_rmse lower=better): det={det_rmse:.6f}")
 
             if args.checks:
                 run_checks(
@@ -1146,9 +1322,11 @@ def main():
                     trainer_model=trainer.model,
                     decoder=results["det"]["model"],
                     x_val=x_val,
-                    y_val=y_val,
+                    y_val=y_val_raw,
                     device=device,
                     pred_batch=args.pair_batch_size,
+                    target=args.target,
+                    target_stats=target_stats,
                     codes_batch=4096,
                     y_batch=4096,
                 )
@@ -1167,10 +1345,12 @@ def main():
                     "hidden_dim": args.hidden_dim,
                     "n_layers": args.n_layers,
                     "n_primitives": args.n_primitives,
-                    "mdn_components": args.mdn_components,
                     "train_pairs": target_pairs,
                     "val_pairs": int(x_val.shape[0]),
                     "metric": "val_rmse",
+                    "target": args.target,
+                    "target_mean": None if target_stats is None else target_stats["mean"].tolist(),
+                    "target_std": None if target_stats is None else target_stats["std"].tolist(),
                 }
                 save_decoders_into_ckpt(
                     ckpt_path=ckpt_path,
@@ -1193,10 +1373,12 @@ def main():
                 "hidden_dim": args.hidden_dim,
                 "n_layers": args.n_layers,
                 "n_primitives": args.n_primitives,
-                "mdn_components": args.mdn_components,
                 "train_pairs": last_target,
                 "val_pairs": int(x_val.shape[0]),
                 "metric": "val_rmse",
+                "target": args.target,
+                "target_mean": None if target_stats is None else target_stats["mean"].tolist(),
+                "target_std": None if target_stats is None else target_stats["std"].tolist(),
             }
             save_decoders_into_ckpt(
                 ckpt_path=ckpt_path,
