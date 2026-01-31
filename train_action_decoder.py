@@ -309,6 +309,17 @@ def eval_rmse(
     return rmse
 
 
+def eval_baseline_rmse(y_train: torch.Tensor, y_val: torch.Tensor) -> float:
+    """
+    Baseline RMSE using the per-dimension mean action from the training set.
+    """
+    if y_train.ndim != 2 or y_val.ndim != 2:
+        raise ValueError(f"Expected y_train/y_val [N, A], got {y_train.shape}, {y_val.shape}")
+    mean_action = y_train.mean(dim=0, keepdim=True)
+    rmse = float((mean_action - y_val).pow(2).mean().sqrt().item())
+    return rmse
+
+
 def train_with_early_stopping(
     model: MacroActionDecoder,
     *,
@@ -485,6 +496,9 @@ def main():
     token_dim = int(p_t_train.shape[-1])
     z_dim = int(z_train.shape[-1])
     out_dim = int(y_train.shape[-1])
+    baseline_rmse = eval_baseline_rmse(y_train, y_val)
+
+    print(f"Baseline (mean action) val_rmse={baseline_rmse:.6f}")
 
     model = MacroActionDecoder(
         token_dim=token_dim,
