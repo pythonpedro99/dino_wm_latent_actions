@@ -12,6 +12,7 @@ from utils import (
     concat_trajdict,
 )
 from torchvision import utils
+from models.action_decoder import MacroActionDecoder
 
 
 class PlanEvaluator:  # evaluator for planning
@@ -127,7 +128,13 @@ class PlanEvaluator:  # evaluator for planning
                     "plan_action_type requires an action_decoder for env rollout, but none was provided."
                 )
             with torch.no_grad():
-                env_actions = self.action_decoder(env_actions)
+                if isinstance(self.action_decoder, MacroActionDecoder):
+                    env_actions = self._decode_macro_actions(
+                        i_z_obses["visual"],
+                        env_actions,
+                    )
+                else:
+                    env_actions = self.action_decoder(env_actions)
         
         
         exec_actions = rearrange(
@@ -165,6 +172,21 @@ class PlanEvaluator:  # evaluator for planning
             )
 
         return logs, successes, e_obses, e_states
+
+    def _decode_macro_actions(self, visual_tokens, z_actions):
+        if visual_tokens.shape[1] < z_actions.shape[1] + 1:
+            raise ValueError(
+                "Not enough rollout frames to decode actions: "
+                f"got {visual_tokens.shape[1]} frames for {z_actions.shape[1]} actions."
+            )
+        batch_size, horizon = z_actions.shape[:2]
+        p_t = visual_tokens[:, :horizon]
+        p_t1 = visual_tokens[:, 1 : horizon + 1]
+        p_t = p_t.reshape(batch_size * horizon, *p_t.shape[2:])
+        p_t1 = p_t1.reshape(batch_size * horizon, *p_t1.shape[2:])
+        z_flat = z_actions.reshape(batch_size * horizon, z_actions.shape[-1])
+        decoded_flat = self.action_decoder(p_t, p_t1, z_flat)
+        return decoded_flat.reshape(batch_size, horizon, -1)
 
     def _compute_rollout_metrics(self, e_state, e_obs, i_z_obs):
         """
