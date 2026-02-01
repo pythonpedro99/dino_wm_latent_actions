@@ -625,11 +625,11 @@ def planning_main(cfg_dict):
 
     required_keys = {"model"}
     plan_action_type = cfg_dict["plan_action_type"]
-    use_action_encoder = model_cfg["use_action_encoder"]
+    use_action_encoder = model_cfg.model["use_action_encoder"]
     
 
-    # if (not use_action_encoder) and plan_action_type in {"latent", "discrete"}:
-    #     required_keys.add("action_decoder")
+    if (not use_action_encoder) and plan_action_type in {"latent", "discrete"}:
+        required_keys.add("action_decoder")
 
     seed(cfg_dict["seed"])
     _, dset = hydra.utils.call(
