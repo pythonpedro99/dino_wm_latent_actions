@@ -71,6 +71,18 @@ def add_repo_to_syspath():
             break
 
 
+def _parse_pair_sizes(value: str) -> List[int]:
+    if isinstance(value, int):
+        return [int(value)]
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        sizes = [int(part) for part in parts]
+        if not sizes:
+            raise ValueError("train_pairs must have at least one value.")
+        return sizes
+    raise TypeError(f"Unsupported train_pairs value: {value!r}")
+
+
 def _extract_latents(
     encode_output: Dict[str, torch.Tensor],
     latent_source: str,
@@ -398,9 +410,24 @@ def build_memmap_cache(
             pass
 
     if meta_path.exists():
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+        existing_pairs = int(meta.get("n_pairs", 0))
+        if existing_pairs >= target_pairs:
+            if not quiet:
+                print(f"[cache] {prefix}: exists ({meta_path})")
+            return
         if not quiet:
-            print(f"[cache] {prefix}: exists ({meta_path})")
-        return
+            print(f"[cache] {prefix}: exists but too small ({existing_pairs} < {target_pairs}), rebuilding.")
+        for fp in cache_dir.glob(f"{prefix}_*.dat"):
+            try:
+                fp.unlink()
+            except FileNotFoundError:
+                pass
+        try:
+            meta_path.unlink()
+        except FileNotFoundError:
+            pass
 
     # probe to get shapes
     p_t, p_t1, z, y = stream.next_pair_chunk()
@@ -564,7 +591,7 @@ def main():
     ap.add_argument("--run_dir", type=str, help="Path to Hydra run directory.")
     ap.add_argument("--ckpt", type=str, required=True, help="Checkpoint filename or absolute path.")
     ap.add_argument("--latent_source", type=str, default="continuous", choices=["continuous", "vq"])
-    ap.add_argument("--train_pairs", type=int, default=50000)
+    ap.add_argument("--train_pairs", type=str, default="50000")
     ap.add_argument("--val_pairs", type=int, default=10000)
 
     ap.add_argument("--pair_batch_size", type=int, default=512)
@@ -628,6 +655,8 @@ def main():
     cache_dir = pair_cache_dir if pair_cache_dir.is_absolute() else (run_dir / pair_cache_dir).resolve()
 
     pin_memory = (not args.no_pin_memory) and torch.cuda.is_available()
+    train_pair_sizes = _parse_pair_sizes(args.train_pairs)
+    max_train_pairs = max(train_pair_sizes)
 
     # Build / reuse validation cache
     val_stream = MacroPairStream(trainer, split="valid", latent_source=args.latent_source, device=device)
@@ -646,7 +675,7 @@ def main():
         train_stream,
         cache_dir=cache_dir,
         prefix="train",
-        target_pairs=int(args.train_pairs),
+        target_pairs=int(max_train_pairs),
         quiet=args.quiet_sampling,
         rebuild=bool(args.rebuild_cache),
     )
@@ -673,28 +702,9 @@ def main():
         persistent_workers=(int(args.loader_workers) > 0),
     )
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=int(args.pair_batch_size),
-        shuffle=True,
-        drop_last=False,
-        num_workers=int(args.loader_workers),
-        pin_memory=pin_memory,
-        persistent_workers=(int(args.loader_workers) > 0),
-    )
-
     token_dim = int(train_ds.d)
     z_dim = int(train_ds.z_dim)
     out_dim = int(train_ds.a_dim)
-
-    model = MacroActionDecoder(
-        token_dim=token_dim,
-        z_dim=z_dim,
-        out_dim=out_dim,
-        disable_e=args.disable_e,
-        disable_delta=args.disable_delta,
-        disable_z=args.disable_z,
-    )
 
     es = EarlyStopConfig(
         max_epochs=int(args.max_epochs),
@@ -704,25 +714,61 @@ def main():
     )
     grad_clip = float(args.grad_clip) if args.grad_clip and args.grad_clip > 0 else None
 
-    results = train_with_early_stopping(
-        model,
-        train_loader=train_loader,
-        val_loader=val_loader,
-        batch_size=int(args.pair_batch_size),
-        lr=float(args.lr),
-        weight_decay=float(args.weight_decay),
-        device=device,
-        es=es,
-        grad_clip=grad_clip,
-        loss_type=str(args.loss_type),
-        huber_delta=float(args.huber_delta),
-    )
+    for train_pairs in train_pair_sizes:
+        if train_pairs > len(train_ds):
+            raise ValueError(
+                f"Requested train_pairs={train_pairs} exceeds cached pairs={len(train_ds)}. "
+                "Rebuild cache with a larger train_pairs value."
+            )
 
-    print("")
-    print(
-        f"Done. best_epoch={results['best_epoch']} "
-        f"best_rmse={results['best_rmse']:.6f} final_rmse={results['final_rmse']:.6f}"
-    )
+        if train_pairs < len(train_ds):
+            subset_ds = torch.utils.data.Subset(train_ds, range(int(train_pairs)))
+        else:
+            subset_ds = train_ds
+
+        train_loader = DataLoader(
+            subset_ds,
+            batch_size=int(args.pair_batch_size),
+            shuffle=True,
+            drop_last=False,
+            num_workers=int(args.loader_workers),
+            pin_memory=pin_memory,
+            persistent_workers=(int(args.loader_workers) > 0),
+        )
+
+        model = MacroActionDecoder(
+            token_dim=token_dim,
+            z_dim=z_dim,
+            out_dim=out_dim,
+            disable_e=args.disable_e,
+            disable_delta=args.disable_delta,
+            disable_z=args.disable_z,
+        )
+
+        results = train_with_early_stopping(
+            model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            batch_size=int(args.pair_batch_size),
+            lr=float(args.lr),
+            weight_decay=float(args.weight_decay),
+            device=device,
+            es=es,
+            grad_clip=grad_clip,
+            loss_type=str(args.loss_type),
+            huber_delta=float(args.huber_delta),
+        )
+
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt_key = f"action_decoder_{int(train_pairs)}"
+        ckpt[ckpt_key] = {k: v.detach().cpu() for k, v in results["model"].state_dict().items()}
+        torch.save(ckpt, ckpt_path)
+
+        print("")
+        print(
+            f"Done ({train_pairs} pairs). best_epoch={results['best_epoch']} "
+            f"best_rmse={results['best_rmse']:.6f} final_rmse={results['final_rmse']:.6f}"
+        )
 
 
 if __name__ == "__main__":
