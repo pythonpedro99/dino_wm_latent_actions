@@ -487,13 +487,16 @@ def eval_rmse_loader(
     loader: DataLoader,
     *,
     device: torch.device,
-) -> float:
+) -> Tuple[float, float]:
     """
     Streaming RMSE: does NOT store all predictions in RAM (fixes eval RAM spikes).
     """
     model.eval()
     sse = 0.0
     n_el = 0
+    batch_rmse_mean = 0.0
+    batch_rmse_m2 = 0.0
+    n_batches = 0
     for xb, xb1, zb, yb in loader:
         xb = xb.to(device, non_blocking=True, dtype=torch.float32)
         xb1 = xb1.to(device, non_blocking=True, dtype=torch.float32)
@@ -502,10 +505,20 @@ def eval_rmse_loader(
 
         pred = model(xb, xb1, zb)
         diff = pred - yb
+        batch_rmse = float(diff.pow(2).mean().sqrt().item())
         sse += float(diff.pow(2).sum().item())
         n_el += int(diff.numel())
+        n_batches += 1
+        delta = batch_rmse - batch_rmse_mean
+        batch_rmse_mean += delta / n_batches
+        batch_rmse_m2 += delta * (batch_rmse - batch_rmse_mean)
 
-    return float((sse / max(n_el, 1)) ** 0.5)
+    rmse = float((sse / max(n_el, 1)) ** 0.5)
+    if n_batches > 1:
+        rmse_std = float((batch_rmse_m2 / (n_batches - 1)) ** 0.5)
+    else:
+        rmse_std = 0.0
+    return rmse, rmse_std
 
 
 def train_with_early_stopping(
@@ -554,7 +567,7 @@ def train_with_early_stopping(
 
         train_loss = total_loss / max(n_batches, 1)
 
-        val_rmse = eval_rmse_loader(model, val_loader, device=device)
+        val_rmse, val_rmse_std = eval_rmse_loader(model, val_loader, device=device)
 
         improved = val_rmse < best_rmse - es.min_delta
         if improved:
@@ -569,20 +582,22 @@ def train_with_early_stopping(
             flag = " *" if improved else ""
             print(
                 f"    [epoch {epoch:4d}]{flag} train_loss={train_loss:.6f} "
-                f"val_rmse={val_rmse:.6f} best={best_rmse:.6f} bad={bad_epochs}/{es.patience}"
+                f"val_rmse={val_rmse:.6f}±{val_rmse_std:.6f} best={best_rmse:.6f} "
+                f"bad={bad_epochs}/{es.patience}"
             )
 
         if bad_epochs >= es.patience:
             break
 
     model.load_state_dict(best_state)
-    final_rmse = eval_rmse_loader(model, val_loader, device=device)
+    final_rmse, final_rmse_std = eval_rmse_loader(model, val_loader, device=device)
 
     return {
         "model": model,
         "best_epoch": best_epoch,
         "best_rmse": best_rmse,
         "final_rmse": final_rmse,
+        "final_rmse_std": final_rmse_std,
     }
 
 
@@ -768,6 +783,7 @@ def main():
         print(
             f"Done ({train_pairs} pairs). best_epoch={results['best_epoch']} "
             f"best_rmse={results['best_rmse']:.6f} final_rmse={results['final_rmse']:.6f}"
+            f"±{results['final_rmse_std']:.6f}"
         )
 
 
