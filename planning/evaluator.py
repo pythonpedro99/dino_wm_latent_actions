@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn.functional as F
 import imageio
 import numpy as np
 from einops import rearrange, repeat
@@ -120,6 +121,7 @@ class PlanEvaluator:  # evaluator for planning
                 num_obs_init=self.wm.num_hist
             )
         i_final_z_obs = self._get_trajdict_last(i_z_obses, action_len + 1)
+        z_obs_g = self.wm.encode_obs(trans_obs_g)
 
         # rollout in env
         env_actions = actions
@@ -154,6 +156,7 @@ class PlanEvaluator:  # evaluator for planning
             e_state=e_final_state,
             e_obs=e_final_obs,
             i_z_obs=i_final_z_obs,
+            z_obs_g=z_obs_g,
         )
 
         # plot trajs
@@ -189,7 +192,7 @@ class PlanEvaluator:  # evaluator for planning
         decoded_flat = self.action_decoder(p_t, p_t1, z_flat)
         return decoded_flat.reshape(batch_size, horizon, -1)
 
-    def _compute_rollout_metrics(self, e_state, e_obs, i_z_obs):
+    def _compute_rollout_metrics(self, e_state, e_obs, i_z_obs, z_obs_g):
         """
         Args
             e_state
@@ -216,12 +219,18 @@ class PlanEvaluator:  # evaluator for planning
         e_obs = move_to_device(self.preprocessor.transform_obs(e_obs), self.device)
         e_z_obs = self.wm.encode_obs(e_obs)
         div_visual_emb = torch.norm(e_z_obs["visual"] - i_z_obs["visual"]).item()
+        goal_emb_mse = F.mse_loss(i_z_obs["visual"], z_obs_g["visual"]).item()
+        goal_emb_l2 = torch.norm(i_z_obs["visual"] - z_obs_g["visual"]).item()
 
         logs.update({
                 "mean_pixel_l2": mean_visual_dist,
                 "mean_emb_l2": div_visual_emb,
+                "mean_goal_emb_mse": goal_emb_mse,
+                "mean_goal_emb_l2": goal_emb_l2,
             })
 
+        print("Goal emb MSE: ", goal_emb_mse)
+        print("Goal emb L2: ", goal_emb_l2)
         return logs, successes
 
     def _plot_rollout_compare(
