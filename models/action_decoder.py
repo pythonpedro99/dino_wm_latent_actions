@@ -286,7 +286,7 @@ class MacroActionDecoder(nn.Module):
         dec_dim: int = 128,
         trunk_dim: int = 256,
         out_dim: int = 10,
-        disable_e: bool = False,
+        disable_e: bool = True,
         disable_delta: bool = False,
         disable_z: bool = False,
     ):
