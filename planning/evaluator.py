@@ -105,6 +105,7 @@ class PlanEvaluator:  # evaluator for planning
         n_evals = actions.shape[0]
         if action_len is None:
             action_len = np.full(n_evals, np.inf)
+            
         # rollout in wm
         trans_obs_0 = move_to_device(
             self.preprocessor.transform_obs(self.obs_0), self.device

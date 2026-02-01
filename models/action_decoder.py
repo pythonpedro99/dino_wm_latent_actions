@@ -357,7 +357,7 @@ class MacroActionDecoder(nn.Module):
         # --- pooled token readouts ---
         e_t_raw = self.attend(P_t)          # [B, 384]
         e_t1_raw = self.attend(P_t1_hat)    # [B, 384]
-        de_raw = e_t1_raw - e_t_raw         # [B, 384]
+        de_raw = e_t1_raw - e_t_raw         # [B, 384] TODO muss geschiftet sein check 
 
         # --- project to decoder space (or substitute constants) ---
         if self.disable_e:

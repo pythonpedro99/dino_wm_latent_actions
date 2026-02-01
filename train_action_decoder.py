@@ -594,7 +594,7 @@ def main():
     ap.add_argument("--train_pairs", type=str, default="50000")
     ap.add_argument("--val_pairs", type=int, default=10000)
 
-    ap.add_argument("--pair_batch_size", type=int, default=512)
+    ap.add_argument("--pair_batch_size", type=int, default=265)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight_decay", type=float, default=0.0)
     ap.add_argument("--grad_clip", type=float, default=0.0)
