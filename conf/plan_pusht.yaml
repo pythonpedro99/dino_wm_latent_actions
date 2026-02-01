@@ -36,6 +36,9 @@ use_lam: true   # false for raw, true for discrete and latent
 use_vq: true   #  false for raw, true for discrete
 is_training: false # always false 
 plan_action_type: "discrete"  # "raw" or "latent" or "discrete" | raw = baseline, always run with use_action_encoder=True
+action_decoder_disable_e: true
+action_decoder_disable_z: false
+action_decoder_disable_deltas: false
 debug_dset_init: False
 
 objective:

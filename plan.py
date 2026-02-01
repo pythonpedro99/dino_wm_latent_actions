@@ -578,9 +578,9 @@ def load_model(
     if plan_action_type in {"latent", "discrete"}:
         action_decoder = MacroActionDecoder(
             token_dim=int(getattr(encoder, "emb_dim")),
-            z_dim=int(model.act_feat_dim),
-            out_dim=int(cfg_dict.get("action_dim", 0)) * int(model_cfg.dataset.frameskip),
-            disable_e=bool(cfg_dict.get("action_decoder_disable_e", False)),
+            z_dim=int(model_cfg.model.latent_action_dim),
+            out_dim=int(2 * int(model_cfg.dataset.frameskip)),
+            disable_e=bool(cfg_dict.get("action_decoder_disable_e", True)),
             disable_delta=bool(cfg_dict.get("action_decoder_disable_delta", False)),
             disable_z=bool(cfg_dict.get("action_decoder_disable_z", False)),
         )
@@ -589,9 +589,6 @@ def load_model(
         action_decoder.to(device)
         action_decoder.eval()
     return model, action_decoder
-
-
-
 
 class DummyWandbRun:
     def __init__(self):
