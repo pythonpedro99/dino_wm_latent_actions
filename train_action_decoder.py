@@ -616,9 +616,9 @@ def main():
     ap.add_argument("--min_delta", type=float, default=1e-4)
     ap.add_argument("--log_every", type=int, default=1)
 
-    ap.add_argument("--disable_e", action="store_true")
-    ap.add_argument("--disable_delta", action="store_true")
-    ap.add_argument("--disable_z", action="store_true")
+    ap.add_argument("--use_e", action="store_true")
+    ap.add_argument("--use_delta", action="store_true")
+    ap.add_argument("--use_z", action="store_true")
 
     ap.add_argument("--quiet_sampling", action="store_true")
 
@@ -750,9 +750,9 @@ def main():
             token_dim=token_dim,
             z_dim=z_dim,
             out_dim=out_dim,
-            use_e=args.disable_e,
-            use_delta=args.disable_delta,
-            use_z=args.disable_z,
+            use_e=args.use_e,
+            use_delta=args.use_delta,
+            use_z=args.use_z,
         )
 
         results = train_with_early_stopping(
