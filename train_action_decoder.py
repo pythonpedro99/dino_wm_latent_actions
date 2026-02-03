@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from omegaconf import OmegaConf
-from models.action_decoder import MacroActionDecoder
+from models.action_decoder import MacroActionDecoderStd
 
 # hard-disable wandb (Trainer calls wandb.init)
 os.environ["WANDB_MODE"] = "disabled"
@@ -484,7 +484,7 @@ def _batch_loss(pred: torch.Tensor, target: torch.Tensor, loss_type: str, huber_
 
 @torch.no_grad()
 def eval_rmse_loader(
-    model: MacroActionDecoder,
+    model: MacroActionDecoderStd,
     loader: DataLoader,
     *,
     device: torch.device,
@@ -510,7 +510,7 @@ def eval_rmse_loader(
 
 
 def train_with_early_stopping(
-    model: MacroActionDecoder,
+    model: MacroActionDecoderStd,
     *,
     train_loader: DataLoader,
     val_loader: DataLoader,
@@ -746,13 +746,13 @@ def main():
             persistent_workers=(int(args.loader_workers) > 0),
         )
 
-        model = MacroActionDecoder(
+        model = MacroActionDecoderStd(
             token_dim=token_dim,
             z_dim=z_dim,
             out_dim=out_dim,
-            disable_e=args.disable_e,
-            disable_delta=args.disable_delta,
-            disable_z=args.disable_z,
+            use_e=args.disable_e,
+            use_delta=args.disable_delta,
+            use_z=args.disable_z,
         )
 
         results = train_with_early_stopping(
