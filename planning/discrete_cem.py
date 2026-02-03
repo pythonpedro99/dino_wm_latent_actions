@@ -85,7 +85,7 @@ class DiscreteCEMPlanner(BasePlanner):
         # Return selection:
         #  - return_mode=True returns argmax(pi) plan (discrete analogue of mean in continuous CEM)
         #  - return_mode=False returns best sampled plan seen so far
-        self.return_mode = bool(kwargs.get("return_mode", True))
+        self.return_mode = bool(kwargs.get("return_mode", False))
 
         # -------------------------
         # 8.3 NN optimization knobs
@@ -343,10 +343,10 @@ class DiscreteCEMPlanner(BasePlanner):
                     indices[0] = torch.argmax(probs, dim=-1)  # (H,S)
 
                 # Optional: inject some fully random samples to prevent premature collapse
-                # p = 0.1
-                # n_rand = int(p * self.num_samples)
-                # if n_rand > 0:
-                #     indices[-n_rand:] = torch.randint(0, K, (n_rand, self.horizon, S), device=self.device)
+                p = 0.1
+                n_rand = int(p * self.num_samples)
+                if n_rand > 0:
+                    indices[-n_rand:] = torch.randint(0, K, (n_rand, self.horizon, S), device=self.device)
 
                 cand_actions = self._decode_indices_to_actions(indices, codebook)  # (N, H, action_dim)
 
