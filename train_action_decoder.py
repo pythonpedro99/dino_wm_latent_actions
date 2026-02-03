@@ -612,7 +612,7 @@ def main():
     ap.add_argument("--huber_delta", type=float, default=1.0)
 
     ap.add_argument("--max_epochs", type=int, default=200)
-    ap.add_argument("--patience", type=int, default=10)
+    ap.add_argument("--patience", type=int, default=5)
     ap.add_argument("--min_delta", type=float, default=1e-4)
     ap.add_argument("--log_every", type=int, default=1)
 
