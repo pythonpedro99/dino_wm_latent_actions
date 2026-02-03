@@ -145,11 +145,28 @@ class PlanEvaluator:  # evaluator for planning
 
         exec_actions = rearrange(
             env_actions.detach().cpu(), "b t (f d) -> b (t f) d", f=self.frameskip
-             )
-        print(f"[pre-denorm] exec_actions(tensor): shape={tuple(exec_actions.shape)} dtype={exec_actions.dtype} device={exec_actions.device} min={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} max={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} mean={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} std={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} nan={torch.isnan(exec_actions).sum().item()} inf={torch.isinf(exec_actions).sum().item()}")
-        exec_actions = self.preprocessor.denormalize_actions(exec_actions).numpy()
-        exec_actions = self.preprocessor.denormalize_actions(exec_actions); print(f"[post-denorm] exec_actions(tensor): shape={tuple(exec_actions.shape)} min={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} max={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} mean={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} std={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} nan={torch.isnan(exec_actions).sum().item()} inf={torch.isinf(exec_actions).sum().item()}")
-        exec_actions = exec_actions.numpy()
+        )
+        print(
+            f"[pre-denorm] exec_actions(tensor): shape={tuple(exec_actions.shape)} dtype={exec_actions.dtype} device={exec_actions.device} "
+            f"min={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} "
+            f"max={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} "
+            f"mean={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} "
+            f"std={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} "
+            f"nan={torch.isnan(exec_actions).sum().item()} inf={torch.isinf(exec_actions).sum().item()}"
+        )
+
+        exec_actions = self.preprocessor.denormalize_actions(exec_actions)
+        print(
+            f"[post-denorm] exec_actions(tensor): shape={tuple(exec_actions.shape)} dtype={exec_actions.dtype} device={exec_actions.device} "
+            f"min={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} "
+            f"max={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} "
+            f"mean={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} "
+            f"std={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} "
+            f"nan={torch.isnan(exec_actions).sum().item()} inf={torch.isinf(exec_actions).sum().item()}"
+        )
+
+        exec_actions = exec_actions.cpu().numpy()
+
         e_obses, e_states = self.env.rollout(self.seed, self.state_0, exec_actions)
         e_visuals = e_obses["visual"]
         e_final_obs = self._get_trajdict_last(e_obses, action_len * self.frameskip + 1)
