@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-import tqdm
+from tqdm import tqdm
 
 import numpy as np
 import torch
