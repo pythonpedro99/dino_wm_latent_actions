@@ -124,6 +124,7 @@ class PlanEvaluator:  # evaluator for planning
         z_obs_g = self.wm.encode_obs(trans_obs_g)
 
         # rollout in env
+        print(f"[pre-decode] actions: shape={tuple(actions.shape)} dtype={actions.dtype} device={actions.device} min={actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} max={actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} mean={actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} std={actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} nan={torch.isnan(actions).sum().item()} inf={torch.isinf(actions).sum().item()}")
         env_actions = actions
         if self.plan_action_type in {"latent", "discrete"}:
             if self.action_decoder is None:
@@ -132,18 +133,23 @@ class PlanEvaluator:  # evaluator for planning
                 )
             with torch.no_grad():
                 if isinstance(self.action_decoder, MacroActionDecoder):
+                    print(f"[macro] i_z_obses['visual']: shape={tuple(i_z_obses['visual'].shape)} env_actions(latent): shape={tuple(env_actions.shape)} frameskip={self.frameskip}")
                     env_actions = self._decode_macro_actions(
                         i_z_obses["visual"],
                         env_actions,
                     )
+                    print(f"[post-decode] env_actions: shape={tuple(env_actions.shape)} dtype={env_actions.dtype} device={env_actions.device} min={env_actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} max={env_actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} mean={env_actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} std={env_actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} nan={torch.isnan(env_actions).sum().item()} inf={torch.isinf(env_actions).sum().item()}")
                 else:
                     env_actions = self.action_decoder(env_actions)
-        
-        
+
+
         exec_actions = rearrange(
             env_actions.detach().cpu(), "b t (f d) -> b (t f) d", f=self.frameskip
              )
+        print(f"[pre-denorm] exec_actions(tensor): shape={tuple(exec_actions.shape)} dtype={exec_actions.dtype} device={exec_actions.device} min={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} max={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} mean={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} std={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} nan={torch.isnan(exec_actions).sum().item()} inf={torch.isinf(exec_actions).sum().item()}")
         exec_actions = self.preprocessor.denormalize_actions(exec_actions).numpy()
+        exec_actions = self.preprocessor.denormalize_actions(exec_actions); print(f"[post-denorm] exec_actions(tensor): shape={tuple(exec_actions.shape)} min={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} max={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} mean={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} std={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} nan={torch.isnan(exec_actions).sum().item()} inf={torch.isinf(exec_actions).sum().item()}")
+        exec_actions = exec_actions.numpy()
         e_obses, e_states = self.env.rollout(self.seed, self.state_0, exec_actions)
         e_visuals = e_obses["visual"]
         e_final_obs = self._get_trajdict_last(e_obses, action_len * self.frameskip + 1)
@@ -224,13 +230,10 @@ class PlanEvaluator:  # evaluator for planning
 
         logs.update({
                 "mean_pixel_l2": mean_visual_dist,
-                "mean_emb_l2": div_visual_emb,
-                "mean_goal_emb_mse": goal_emb_mse,
-                "mean_goal_emb_l2": goal_emb_l2,
-            })
+                "mean_wm_env_emb_l2": div_visual_emb,
+                "mean_wm_emb_l2": goal_emb_l2,
 
-        print("Goal emb MSE: ", goal_emb_mse)
-        print("Goal emb L2: ", goal_emb_l2)
+            })
         return logs, successes
 
     def _plot_rollout_compare(
