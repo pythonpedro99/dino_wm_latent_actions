@@ -629,7 +629,7 @@ def planning_main(cfg_dict):
     
 
     if (not use_action_encoder) and plan_action_type in {"latent", "discrete"}:
-        required_keys.add("action_decoder")
+        required_keys.add("action_decoder_100000")
 
     seed(cfg_dict["seed"])
     _, dset = hydra.utils.call(

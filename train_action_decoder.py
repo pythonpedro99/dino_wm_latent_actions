@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+import tqdm
 
 import numpy as np
 import torch
@@ -535,7 +536,14 @@ def train_with_early_stopping(
         total_loss = 0.0
         n_batches = 0
 
-        for xb, xb1, zb, yb in train_loader:
+        pbar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch}/{es.max_epochs}",
+            total=len(train_loader) if hasattr(train_loader, "__len__") else None,
+            leave=False,  # set True if you want to keep bars
+        )
+
+        for xb, xb1, zb, yb in pbar:
             xb = xb.to(device, non_blocking=True, dtype=torch.float32)
             xb1 = xb1.to(device, non_blocking=True, dtype=torch.float32)
             zb = zb.to(device, non_blocking=True, dtype=torch.float32)
@@ -552,8 +560,10 @@ def train_with_early_stopping(
             total_loss += float(loss.item())
             n_batches += 1
 
-        train_loss = total_loss / max(n_batches, 1)
+            # live display: batch progress + running avg loss
+            pbar.set_postfix(loss=f"{total_loss / n_batches:.6f}")
 
+        train_loss = total_loss / max(n_batches, 1)
         val_rmse = eval_rmse_loader(model, val_loader, device=device)
 
         improved = val_rmse < best_rmse - es.min_delta

@@ -259,162 +259,127 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class MacroActionDecoder(nn.Module):
-    """
-    Macro-action decoder for frameskip=5 (outputs 10D = 5*(x,y) primitives).
 
-    Designed for clean ablations:
-      - disable_e:    remove dependence on e_t (state), uses a learned constant instead
-      - disable_delta:remove dependence on delta (e_{t+1}-e_t), uses a learned constant instead
-      - disable_z:    remove FiLM conditioning on z, uses identity FiLM (gamma=1, beta=0)
+class MacroActionDecoderStd(nn.Module):
+    """
+    Standard macro-action decoder:
+      - Attention pooling over patch tokens (learned query).
+      - Feature concat + MLP head (no FiLM, no gamma clamps).
 
     Inputs:
-      P_t       : [B, N, 384] patch tokens at time t
-      P_t1_hat  : [B, N, 384] predicted patch tokens at time t+1 (or can pass P_t1 for oracle)
-      z         : [B, 32] continuous codebook vector (can pass None if disable_z=True)
+      P_t      : [B, N, token_dim]
+      P_t1_hat : [B, N, token_dim]
+      z        : [B, z_dim]
 
-    Notes:
-      - We keep trunk input dimension fixed at 256 by substituting learned constants when disabling e/delta.
-      - This ensures ablations are comparable (same trunk/head capacity).
+    Output:
+      a_macro  : [B, out_dim]   (e.g., out_dim=10 for frameskip=5 and 2D primitive)
     """
 
     def __init__(
         self,
         token_dim: int = 384,
         z_dim: int = 32,
-        hidden_e: int = 256,
-        dec_dim: int = 128,
-        trunk_dim: int = 256,
+        dec_dim: int = 128,      # projection dim for e and delta
+        hid: int = 256,          # MLP hidden width
         out_dim: int = 10,
-        disable_e: bool = True,
-        disable_delta: bool = False,
-        disable_z: bool = False,
+        use_e: bool = True,
+        use_delta: bool = True,
+        use_z: bool = True,
+        learned_missing: bool = True,  # learned constants for ablated features
+        bound_output: bool = False,    # optional tanh bounding
     ):
         super().__init__()
-        assert trunk_dim == 2 * dec_dim, "Expected trunk_dim == 2*dec_dim (concat of e and delta projections)."
-
         self.token_dim = token_dim
         self.z_dim = z_dim
-        self.disable_e = disable_e
-        self.disable_delta = disable_delta
-        self.disable_z = disable_z
+        self.dec_dim = dec_dim
+        self.out_dim = out_dim
 
-        # Attention pooling query (shared for P_t and P_t1_hat)
+        self.use_e = use_e
+        self.use_delta = use_delta
+        self.use_z = use_z
+        self.learned_missing = learned_missing
+        self.bound_output = bound_output
+
+        # --- attention pooling query (shared) ---
         self.pool_query = nn.Parameter(torch.randn(token_dim) * 0.02)
 
-        # Projections from pooled tokens/delta into decoder space
-        self.mlp_e = nn.Sequential(
-            nn.Linear(token_dim, hidden_e),
+        # --- projections into decoder space ---
+        self.proj_e = nn.Sequential(
+            nn.Linear(token_dim, hid),
             nn.GELU(),
-            nn.Linear(hidden_e, dec_dim),
+            nn.Linear(hid, dec_dim),
         )
-        self.mlp_d = nn.Sequential(
-            nn.Linear(token_dim, hidden_e),
+        self.proj_d = nn.Sequential(
+            nn.Linear(token_dim, hid),
             nn.GELU(),
-            nn.Linear(hidden_e, dec_dim),
-        )
-
-        # Learned substitutes used when disabling e/delta (keeps capacity comparable)
-        self.e_const = nn.Parameter(torch.zeros(dec_dim))
-        self.d_const = nn.Parameter(torch.zeros(dec_dim))
-
-        # FiLM from z: produce (gamma, beta) each of size trunk_dim
-        # We generate FiLM params for the *first trunk linear output* (size trunk_dim)
-        self.mlp_z = nn.Sequential(
-            nn.Linear(z_dim, dec_dim),
-            nn.GELU(),
-            nn.Linear(dec_dim, 2 * trunk_dim),
+            nn.Linear(hid, dec_dim),
         )
 
-        # Trunk + head
-        self.trunk_lin = nn.Linear(trunk_dim, trunk_dim)
-        self.trunk_norm = nn.LayerNorm(trunk_dim)
-        self.trunk_act = nn.GELU()
-        self.trunk_lin2 = nn.Linear(trunk_dim, dec_dim)
-        self.trunk_act2 = nn.GELU()
+        # --- learned substitutes for missing features (keeps input dim fixed) ---
+        if learned_missing:
+            self.e_const = nn.Parameter(torch.zeros(dec_dim))
+            self.d_const = nn.Parameter(torch.zeros(dec_dim))
+            self.z_const = nn.Parameter(torch.zeros(z_dim))
+        else:
+            self.register_buffer("e_const", torch.zeros(dec_dim))
+            self.register_buffer("d_const", torch.zeros(dec_dim))
+            self.register_buffer("z_const", torch.zeros(z_dim))
 
-        self.head = nn.Linear(dec_dim, out_dim)
+        # --- MLP head on concatenated features ---
+        in_dim = dec_dim + dec_dim + z_dim  # [e, d, z]
+        self.mlp = nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, hid),
+            nn.GELU(),
+            nn.Linear(hid, hid),
+            nn.GELU(),
+            nn.Linear(hid, out_dim),
+        )
+
+        # Optional bounded output
+        if bound_output:
+            self.out_scale = nn.Parameter(torch.ones(out_dim))
 
     def attend(self, P: torch.Tensor) -> torch.Tensor:
-        """
-        Attention pooling over patch tokens.
-        P: [B, N, D]
-        returns pooled: [B, D]
-        """
-        # logits: [B, N]
-        logits = (P @ self.pool_query) / math.sqrt(self.token_dim)
+        """Attention pooling over patch tokens. P: [B,N,D] -> [B,D]."""
+        logits = (P @ self.pool_query) / math.sqrt(self.token_dim)  # [B,N]
         w = torch.softmax(logits, dim=1)
-        return (w.unsqueeze(-1) * P).sum(dim=1)
+        return (w.unsqueeze(-1) * P).sum(dim=1)  # [B,D]
 
-    def forward(
-        self,
-        P_t: torch.Tensor,
-        P_t1_hat: torch.Tensor,
-        z: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def forward(self, P_t: torch.Tensor, P_t1_hat: torch.Tensor, z: Optional[torch.Tensor]) -> torch.Tensor:
         B = P_t.shape[0]
 
-        # --- pooled token readouts ---
-        e_t_raw = self.attend(P_t)          # [B, 384]
-        e_t1_raw = self.attend(P_t1_hat)    # [B, 384]
-        de_raw = e_t1_raw - e_t_raw         # [B, 384] TODO muss geschiftet sein check 
+        # pooled token readouts
+        e_t_raw = self.attend(P_t)       # [B, token_dim]
+        e_t1_raw = self.attend(P_t1_hat) # [B, token_dim]
+        de_raw = e_t1_raw - e_t_raw      # [B, token_dim]
 
-        # --- project to decoder space (or substitute constants) ---
-        if self.disable_e:
-            e = self.e_const.unsqueeze(0).expand(B, -1)  # [B, 128]
+        # feature: e
+        if self.use_e:
+            e = self.proj_e(F.layer_norm(e_t_raw, [self.token_dim]))  # [B, dec_dim]
         else:
-            e = self.mlp_e(F.layer_norm(e_t_raw, [self.token_dim]))  # [B, 128]
+            e = self.e_const.unsqueeze(0).expand(B, -1)
 
-        if self.disable_delta:
-            d = self.d_const.unsqueeze(0).expand(B, -1)  # [B, 128]
+        # feature: delta
+        if self.use_delta:
+            d = self.proj_d(F.layer_norm(de_raw, [self.token_dim]))   # [B, dec_dim]
         else:
-            d = self.mlp_d(F.layer_norm(de_raw, [self.token_dim]))   # [B, 128]
+            d = self.d_const.unsqueeze(0).expand(B, -1)
 
-        h = torch.cat([e, d], dim=-1)  # [B, 256]
-
-        # --- trunk + FiLM conditioning ---
-        h = self.trunk_lin(h)          # [B, 256]
-
-        if self.disable_z:
-            gamma = torch.ones_like(h)
-            beta = torch.zeros_like(h)
-        else:
+        # feature: z
+        if self.use_z:
             if z is None:
-                raise ValueError("z must be provided unless disable_z=True")
+                raise ValueError("z must be provided when use_z=True")
             if z.shape[-1] != self.z_dim:
                 raise ValueError(f"Expected z.shape[-1]=={self.z_dim}, got {z.shape[-1]}")
-            gamma_beta = self.mlp_z(z)              # [B, 512] if trunk_dim=256
-            gamma, beta = gamma_beta.chunk(2, dim=-1)  # each [B, 256]
-            # Optional stabilization: start near identity
-            gamma = 1.0 + 0.1 * torch.tanh(gamma)
+            zz = z
+        else:
+            zz = self.z_const.unsqueeze(0).expand(B, -1)
 
-        h = gamma * h + beta
+        x = torch.cat([e, d, zz], dim=-1)  # [B, 2*dec_dim + z_dim]
+        y = self.mlp(x)                    # [B, out_dim]
 
-        h = self.trunk_norm(h)
-        h = self.trunk_act(h)
-        h = self.trunk_lin2(h)         # [B, 128]
-        h = self.trunk_act2(h)
+        if self.bound_output:
+            y = torch.tanh(y) * self.out_scale
 
-        return self.head(h)
-
-
-# -------------------------
-# Example ablation configs:
-# -------------------------
-# Full model:
-# dec = MacroActionDecoder(disable_e=False, disable_delta=False, disable_z=False)
-#
-# Remove z (state+delta only):
-# dec = MacroActionDecoder(disable_z=True)
-#
-# Remove delta (state+z only):
-# dec = MacroActionDecoder(disable_delta=True)
-#
-# Remove e_t (delta+z only)  <-- less meaningful but sometimes useful
-# dec = MacroActionDecoder(disable_e=True)
-#
-# Code-only baseline (approx): disable_e=True, disable_delta=True  (then z only via FiLM)
-# dec = MacroActionDecoder(disable_e=True, disable_delta=True, disable_z=False)
-#
-# State-only baseline: disable_delta=True, disable_z=True
-# dec = MacroActionDecoder(disable_delta=True, disable_z=True)
+        return y
