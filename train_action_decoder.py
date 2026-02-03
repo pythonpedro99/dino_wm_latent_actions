@@ -603,6 +603,7 @@ def main():
     ap.add_argument("--latent_source", type=str, default="continuous", choices=["continuous", "vq"])
     ap.add_argument("--train_pairs", type=str, default="50000")
     ap.add_argument("--val_pairs", type=int, default=10000)
+    ap.add_argument("--seed", type=int, default=None, help="Random seed (defaults to cfg.training.seed when available).")
 
     ap.add_argument("--pair_batch_size", type=int, default=265)
     ap.add_argument("--lr", type=float, default=1e-3)
@@ -641,6 +642,16 @@ def main():
     cfg = OmegaConf.load(cfg_path)
 
     ensure_hydra_config(run_dir)
+
+    seed_value = args.seed
+    if seed_value is None:
+        seed_value = getattr(getattr(cfg, "training", None), "seed", None)
+    if seed_value is not None:
+        from utils import seed
+
+        seed(int(seed_value))
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
     from dino_wm_latent_actions.train import Trainer
     trainer = Trainer(cfg)
@@ -723,6 +734,9 @@ def main():
         log_every=int(args.log_every),
     )
     grad_clip = float(args.grad_clip) if args.grad_clip and args.grad_clip > 0 else None
+    train_generator = None
+    if seed_value is not None:
+        train_generator = torch.Generator().manual_seed(int(seed_value))
 
     for train_pairs in train_pair_sizes:
         if train_pairs > len(train_ds):
@@ -740,6 +754,7 @@ def main():
             subset_ds,
             batch_size=int(args.pair_batch_size),
             shuffle=True,
+            generator=train_generator,
             drop_last=False,
             num_workers=int(args.loader_workers),
             pin_memory=pin_memory,
