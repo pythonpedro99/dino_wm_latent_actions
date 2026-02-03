@@ -773,6 +773,7 @@ def main():
         ckpt_key = f"action_decoder_{int(train_pairs)}"
         ckpt[ckpt_key] = {k: v.detach().cpu() for k, v in results["model"].state_dict().items()}
         torch.save(ckpt, ckpt_path)
+        print(f"Saved action decoder weights to checkpoint under key: {ckpt_key}")
 
         print("")
         print(
