@@ -85,7 +85,7 @@ class DiscreteCEMPlanner(BasePlanner):
         # Return selection:
         #  - return_mode=True returns argmax(pi) plan (discrete analogue of mean in continuous CEM)
         #  - return_mode=False returns best sampled plan seen so far
-        self.return_mode = bool(kwargs.get("return_mode", True))
+        self.return_mode = bool(kwargs.get("return_mode", False))
 
         # -------------------------
         # 8.3 NN optimization knobs
@@ -295,7 +295,7 @@ class DiscreteCEMPlanner(BasePlanner):
         """
         Args:
             actions: optional warm-start action sequence (normalized),
-                     (B, T, action_dim), T <= horizon
+                    (B, T, action_dim), T <= horizon
 
         Returns:
             planned_actions: (B, H, action_dim) torch.Tensor
@@ -316,7 +316,11 @@ class DiscreteCEMPlanner(BasePlanner):
         best_loss = torch.full((n_evals,), float("inf"), device=self.device)
         best_indices = torch.zeros((n_evals, self.horizon, S), dtype=torch.long, device=self.device)
 
+        # For checking whether eval_actions becomes identical
+        prev_eval_actions = None
+
         for i in range(self.opt_steps):
+            pi_prev = pi.clone()
             iter_best_losses = []
 
             for traj in range(n_evals):
@@ -338,6 +342,12 @@ class DiscreteCEMPlanner(BasePlanner):
                 if self.use_mode_as_first_sample:
                     indices[0] = torch.argmax(probs, dim=-1)  # (H,S)
 
+                # Optional: inject some fully random samples to prevent premature collapse
+                p = 0.1
+                n_rand = int(p * self.num_samples)
+                if n_rand > 0:
+                    indices[-n_rand:] = torch.randint(0, K, (n_rand, self.horizon, S), device=self.device)
+
                 cand_actions = self._decode_indices_to_actions(indices, codebook)  # (N, H, action_dim)
 
                 with torch.no_grad():
@@ -354,6 +364,12 @@ class DiscreteCEMPlanner(BasePlanner):
                 elite_indices = indices[elite_rank]  # (M, H, S)
                 elite_losses = loss[elite_rank]      # (M,)
 
+                if traj == 0:
+                    print(
+                        f"[cem] it={i+1} traj={traj} elite0={elite_losses[0].item():.6g} "
+                        f"best_so_far={best_loss[traj].item():.6g}"
+                    )
+
                 if elite_losses[0] < best_loss[traj]:
                     best_loss[traj] = elite_losses[0]
                     best_indices[traj] = elite_indices[0]
@@ -363,10 +379,15 @@ class DiscreteCEMPlanner(BasePlanner):
                 pi_mle = self._mle_update(elite_indices, K=K)      # (H,S,K)
                 pi[traj] = self._momentum_update(pi[traj], pi_mle)
 
-            mean_loss = float(np.mean(iter_best_losses)) if iter_best_losses else float("nan")
+            # ---- diagnostics: pi change + entropy/collapse (once per CEM iteration) ----
             with torch.no_grad():
+                dpi = (pi - pi_prev).abs().mean().item()
                 ent = -(pi * (pi.clamp_min(self.min_prob)).log()).sum(dim=-1)  # (B,H,S)
                 mean_ent = ent.mean().item()
+                maxp = pi.max(dim=-1).values.mean().item()
+            print(f"[cem] it={i+1} d_pi_mean={dpi:.6g} entropy_mean={mean_ent:.6g} max_prob_mean={maxp:.6g}")
+
+            mean_loss = float(np.mean(iter_best_losses)) if iter_best_losses else float("nan")
 
             self.wandb_run.log(
                 {
@@ -376,11 +397,19 @@ class DiscreteCEMPlanner(BasePlanner):
                 }
             )
 
+            # ---- eval ----
             if self.evaluator is not None and (i % self.eval_every == 0):
                 if self.return_mode:
                     eval_actions = self._pi_mode_actions(pi, codebook)
                 else:
                     eval_actions = self._decode_indices_to_actions(best_indices, codebook)
+
+                if prev_eval_actions is None:
+                    prev_eval_actions = eval_actions.detach().clone()
+                else:
+                    diff = (eval_actions.detach() - prev_eval_actions).abs().mean().item()
+                    print(f"[cem] it={i+1} eval_actions_absdiff_mean={diff:.6g}")
+                    prev_eval_actions = eval_actions.detach().clone()
 
                 logs, successes, _, _ = self.evaluator.eval_actions(
                     eval_actions, filename=f"{self.logging_prefix}_output_{i+1}"
@@ -389,6 +418,7 @@ class DiscreteCEMPlanner(BasePlanner):
                 logs.update({"step": i + 1})
                 self.wandb_run.log(logs)
                 self.dump_logs(logs)
+
                 if np.all(successes):
                     break
 
@@ -398,3 +428,4 @@ class DiscreteCEMPlanner(BasePlanner):
             planned_actions = self._decode_indices_to_actions(best_indices, codebook)
 
         return planned_actions, np.full(n_evals, np.inf)
+

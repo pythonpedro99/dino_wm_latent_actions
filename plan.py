@@ -20,6 +20,7 @@ from env.venv import SubprocVectorEnv
 from custom_resolvers import replace_slash
 from preprocessor import Preprocessor
 from planning.evaluator import PlanEvaluator
+from models.action_decoder import MacroActionDecoder
 from utils import cfg_to_dict, seed
 from typing import Any, Iterable
 
@@ -432,7 +433,7 @@ def load_model(
             f"  present: {present}\n"
         )
 
-    action_decoder = nn.Identity()    #result.get("action_decoder", None)
+    action_decoder = None
 
     use_action_encoder = bool(getattr(model_cfg.model, "use_action_encoder"))
     use_lam          = bool(getattr(model_cfg.model, "use_lam"))
@@ -573,10 +574,21 @@ def load_model(
 
     model.to(device)
     model.eval()
+
+    if plan_action_type in {"latent", "discrete"}:
+        action_decoder = MacroActionDecoder(
+            token_dim=int(getattr(encoder, "emb_dim")),
+            z_dim=int(model_cfg.model.latent_action_dim),
+            out_dim=int(2 * int(model_cfg.dataset.frameskip)),
+            disable_e=bool(cfg_dict.get("action_decoder_disable_e", True)),
+            disable_delta=bool(cfg_dict.get("action_decoder_disable_delta", False)),
+            disable_z=bool(cfg_dict.get("action_decoder_disable_z", False)),
+        )
+        if "action_decoder" in result:
+            action_decoder.load_state_dict(result["action_decoder"], strict=True)
+        action_decoder.to(device)
+        action_decoder.eval()
     return model, action_decoder
-
-
-
 
 class DummyWandbRun:
     def __init__(self):
@@ -613,11 +625,11 @@ def planning_main(cfg_dict):
 
     required_keys = {"model"}
     plan_action_type = cfg_dict["plan_action_type"]
-    use_action_encoder = model_cfg["use_action_encoder"]
+    use_action_encoder = model_cfg.model["use_action_encoder"]
     
 
-    # if (not use_action_encoder) and plan_action_type in {"latent", "discrete"}:
-    #     required_keys.add("action_decoder")
+    if (not use_action_encoder) and plan_action_type in {"latent", "discrete"}:
+        required_keys.add("action_decoder_100000")
 
     seed(cfg_dict["seed"])
     _, dset = hydra.utils.call(
