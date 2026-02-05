@@ -31,11 +31,11 @@ n_evals: 100
 goal_source: 'dset'
 goal_H: 5 
 n_plot_samples: 0
-use_action_encoder: true   # True for baseline
-use_lam: false   # false for raw, true for discrete and latent
+use_action_encoder: false   # True for baseline
+use_lam: true   # false for raw, true for discrete and latent
 use_vq: false   #  false for raw, true for discrete
 is_training: false # always false 
-plan_action_type: "raw"  # "raw" or "latent" or "discrete" | raw = baseline, always run with use_action_encoder=True
+plan_action_type: "latent"  # "raw" or "latent" or "discrete" | raw = baseline, always run with use_action_encoder=True
 use_e: true
 use_z: true
 use_delta: false
