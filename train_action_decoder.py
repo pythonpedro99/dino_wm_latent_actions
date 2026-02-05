@@ -605,7 +605,7 @@ def main():
     ap.add_argument("--val_pairs", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=None, help="Random seed (defaults to cfg.training.seed when available).")
 
-    ap.add_argument("--pair_batch_size", type=int, default=265)
+    ap.add_argument("--pair_batch_size", type=int, default=256)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight_decay", type=float, default=0.0)
     ap.add_argument("--grad_clip", type=float, default=0.0)
