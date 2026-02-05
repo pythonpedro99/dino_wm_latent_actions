@@ -49,7 +49,7 @@ objective:
 
 planner:
   _target_: planning.mpc.MPCPlanner
-  max_iter: 5 
+  max_iter: 10 
   n_taken_actions: 5
   sub_planner:
     target: planning.cem.CEMPlanner
