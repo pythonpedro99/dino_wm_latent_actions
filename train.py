@@ -862,7 +862,7 @@ class Trainer:
             }
 
             # ---- collapse metrics ----
-            if self.use_lam:
+            if encode_output.get("z") is not None:
                 was_training = self.model.training
                 self.model.eval()
                 with torch.no_grad():
@@ -1044,7 +1044,7 @@ class Trainer:
                     key: value.mean().item() for key, value in loss_components.items()
                 }
 
-                if self.use_lam:
+                if encode_output.get("z") is not None:
                     z_src, z_tgt, act_base_h = self._extract_lam_eval_tensors(encode_output)
                     swap_s = float(self.metric_z_swap_score(z_src, z_tgt, act_base_h))
                     delta, mse_base, mse_shuf = self.metric_action_shuffle_delta(z_src, z_tgt, act_base_h)
