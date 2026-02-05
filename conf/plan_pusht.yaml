@@ -22,23 +22,23 @@ hydra:
             "export MASTER_PORT=$(for port in $(shuf -i 30000-65500 -n 20); do if [[ $(netstat -tupln 2>&1 | grep $port | wc -l) -eq 0 ]] ; then echo $port; break; fi; done;)",]
 
 # model to load for planning
-ckpt_base_path: /content/drive/MyDrive/DINO-WM/LatentActionVQModel/LatentActionVQModel/outputs/2026-01-29/08-55-20  # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
+ckpt_base_path:   # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
 model_name: null
 model_epoch: latest
 
 seed: 0
-n_evals: 1
+n_evals: 100
 goal_source: 'dset'
 goal_H: 5 
 n_plot_samples: 0
-use_action_encoder: false   # True for baseline
-use_lam: true   # false for raw, true for discrete and latent
-use_vq: true   #  false for raw, true for discrete
+use_action_encoder: true   # True for baseline
+use_lam: false   # false for raw, true for discrete and latent
+use_vq: false   #  false for raw, true for discrete
 is_training: false # always false 
-plan_action_type: "discrete"  # "raw" or "latent" or "discrete" | raw = baseline, always run with use_action_encoder=True
-action_decoder_disable_e: true
-action_decoder_disable_z: false
-action_decoder_disable_deltas: false
+plan_action_type: "raw"  # "raw" or "latent" or "discrete" | raw = baseline, always run with use_action_encoder=True
+use_e: true
+use_z: true
+use_delta: false
 debug_dset_init: False
 
 objective:
@@ -48,7 +48,7 @@ objective:
   mode: last
 
 planner:
-  _target_: planning.discrete_cem.DiscreteCEMPlanner
+  _target_: planning.cem.CEMPlanner
   horizon: 5
   topk: 30
   num_samples: 300
@@ -59,9 +59,9 @@ planner:
   momentum: 0.7
   min_prob: 0.001
   init_smoothing: 0.05
-  sample_temperature: 1.0
+  sample_temperature: 1.5
   use_mode_as_first_sample: false
   return_mode: false
-  name: discrete_cem
+  name: cem
 
 
