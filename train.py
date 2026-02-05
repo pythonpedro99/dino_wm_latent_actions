@@ -1011,6 +1011,7 @@ class Trainer:
         val_shuffle_deltas = []
         val_mse_base = []
         val_mse_shuf = []
+        val_vq_counts = None
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process and len(self.train_traj_dset) > 0 and self.cfg.model.has_predictor:
             with torch.no_grad():
@@ -1058,6 +1059,18 @@ class Trainer:
                     val_shuffle_deltas.append(float(swap_mean[1].item()))
                     val_mse_base.append(float(swap_mean[2].item()))
                     val_mse_shuf.append(float(swap_mean[3].item()))
+
+                if self.model.use_vq and (encode_output.get("vq_outputs") is not None):
+                    vq_idx = encode_output["vq_outputs"].get("indices", None)
+                    if vq_idx is not None:
+                        idx = vq_idx.detach().reshape(-1).to(torch.long)
+                        batch_counts = torch.bincount(idx, minlength=self.codebook_size).float().unsqueeze(0)
+                        batch_counts = self.accelerator.gather_for_metrics(batch_counts)
+                        batch_counts = batch_counts.sum(dim=0).to("cpu")
+                        if val_vq_counts is None:
+                            val_vq_counts = batch_counts
+                        else:
+                            val_vq_counts += batch_counts
 
                 if self.cfg.model.has_decoder and plot:
                     # only eval images when plotting due to speed
@@ -1126,6 +1139,22 @@ class Trainer:
                         "val_mse_shuf": [sum(val_mse_shuf) / len(val_mse_shuf)],
                     }
                 )
+
+            if val_vq_counts is not None:
+                vq_total = float(val_vq_counts.sum().item())
+                if vq_total > 0:
+                    p = val_vq_counts / vq_total
+                    entropy = -(p * (p + 1e-8).log()).sum().item()
+                    val_ppl = math.exp(entropy)
+                    val_ppl_norm = val_ppl / float(self.codebook_size)
+                    val_dead_rate = float(1.0 - (val_vq_counts > 0).float().mean().item())
+                    self.logs_update(
+                        {
+                            "val_ppl": [float(val_ppl)],
+                            "val_ppl_norm": [float(val_ppl_norm)],
+                            "val_dead_rate": [float(val_dead_rate)],
+                        }
+                    )
 
 
     def openloop_rollout(
