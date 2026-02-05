@@ -866,18 +866,7 @@ class Trainer:
                 was_training = self.model.training
                 self.model.eval()
                 with torch.no_grad():
-                    
-                    z = encode_output["z"].detach()             # [B,T,P',D']
-                    z_src = z[:, : self.model.num_hist]         # [B,H,P',D']
-                    z_tgt = z[:, self.model.num_pred :]         # [B,H,P',D']
-
-                    # base action vectors aligned with history axis H
-                    if self.model.use_vq and (encode_output.get("quantized_latent_actions") is not None):
-                        act_base_h = encode_output["quantized_latent_actions"][:, : self.model.num_hist]
-                    elif (encode_output.get("latent_actions") is not None):
-                        act_base_h = encode_output["latent_actions"][:, : self.model.num_hist]
-                    else:
-                        _, act_base_h = self.model.separate_emb(z_src)
+                    z_src, z_tgt, act_base_h = self._extract_lam_eval_tensors(encode_output)
 
                    
                     # ----------------------------
@@ -1018,6 +1007,10 @@ class Trainer:
 
     def val(self):
         self.model.eval()
+        val_swap_scores = []
+        val_shuffle_deltas = []
+        val_mse_base = []
+        val_mse_shuf = []
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process and len(self.train_traj_dset) > 0 and self.cfg.model.has_predictor:
             with torch.no_grad():
@@ -1049,6 +1042,22 @@ class Trainer:
                 loss_components = {
                     key: value.mean().item() for key, value in loss_components.items()
                 }
+
+                if self.use_lam:
+                    z_src, z_tgt, act_base_h = self._extract_lam_eval_tensors(encode_output)
+                    swap_s = float(self.metric_z_swap_score(z_src, z_tgt, act_base_h))
+                    delta, mse_base, mse_shuf = self.metric_action_shuffle_delta(z_src, z_tgt, act_base_h)
+
+                    swap_metrics = torch.tensor(
+                        [[swap_s, float(delta), float(mse_base), float(mse_shuf)]],
+                        device=self.device,
+                    )
+                    swap_metrics = self.accelerator.gather_for_metrics(swap_metrics)
+                    swap_mean = swap_metrics.mean(dim=0)
+                    val_swap_scores.append(float(swap_mean[0].item()))
+                    val_shuffle_deltas.append(float(swap_mean[1].item()))
+                    val_mse_base.append(float(swap_mean[2].item()))
+                    val_mse_shuf.append(float(swap_mean[3].item()))
 
                 if self.cfg.model.has_decoder and plot:
                     # only eval images when plotting due to speed
@@ -1107,6 +1116,16 @@ class Trainer:
                     )
                 loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
                 self.logs_update(loss_components)
+
+            if val_swap_scores:
+                self.logs_update(
+                    {
+                        "val_swap_s": [sum(val_swap_scores) / len(val_swap_scores)],
+                        "val_shuffle_delta": [sum(val_shuffle_deltas) / len(val_shuffle_deltas)],
+                        "val_mse_base": [sum(val_mse_base) / len(val_mse_base)],
+                        "val_mse_shuf": [sum(val_mse_shuf) / len(val_mse_shuf)],
+                    }
+                )
 
 
     def openloop_rollout(
@@ -1206,6 +1225,20 @@ class Trainer:
         # shuffle_u_threshold: 0.05 (<) => bad if delta < 0.05
         # shuffle_z_threshold: 0.65 (>) => bad if swap_s > 0.65
         return (shuffle_delta < self.shuffle_u_threshold) or (swap_s > self.shuffle_z_threshold)
+
+    def _extract_lam_eval_tensors(self, encode_output):
+        z = encode_output["z"].detach()                 # [B,T,P',D']
+        z_src = z[:, : self.model.num_hist]             # [B,H,P',D']
+        z_tgt = z[:, self.model.num_pred :]             # [B,H,P',D']
+
+        if self.model.use_vq and (encode_output.get("quantized_latent_actions") is not None):
+            act_base_h = encode_output["quantized_latent_actions"][:, : self.model.num_hist]
+        elif encode_output.get("latent_actions") is not None:
+            act_base_h = encode_output["latent_actions"][:, : self.model.num_hist]
+        else:
+            _, act_base_h = self.model.separate_emb(z_src)
+
+        return z_src, z_tgt, act_base_h
     
     @torch.no_grad()
     def metric_z_swap_score(self, z_src, z_tgt, act_base_h) -> float:
