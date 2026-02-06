@@ -23,6 +23,8 @@ class CEMPlanner(BasePlanner):
         plan_action_type,
         logging_prefix="plan_0",
         log_filename="logs.json",
+        latent_prior_mu=None,
+        latent_prior_sigma=None,
         **kwargs,
     ):
         super().__init__(
@@ -42,6 +44,15 @@ class CEMPlanner(BasePlanner):
         self.opt_steps = opt_steps
         self.eval_every = eval_every
         self.logging_prefix = logging_prefix
+        self.latent_prior_mu = (
+            torch.as_tensor(latent_prior_mu) if latent_prior_mu is not None else None
+        )
+        self.latent_prior_sigma = (
+            torch.as_tensor(latent_prior_sigma) if latent_prior_sigma is not None else None
+        )
+        self.latent_prior_k = float(kwargs.get("latent_prior_k", 2.0))
+        self.latent_prior_lambda = float(kwargs.get("latent_prior_lambda", 0.01))
+        self.use_prior_sampling = bool(kwargs.get("use_prior_sampling", True))
 
     def init_mu_sigma(self, obs_0, actions=None):
         """
@@ -61,6 +72,17 @@ class CEMPlanner(BasePlanner):
         if remaining_t > 0:
             new_mu = torch.zeros(n_evals, remaining_t, self.action_dim)
             mu = torch.cat([mu, new_mu.to(device)], dim=1)
+        if (
+            actions is None
+            and self.use_prior_sampling
+            and self.latent_prior_mu is not None
+            and self.latent_prior_sigma is not None
+            and self.plan_action_type == "latent"
+        ):
+            prior_mu = self.latent_prior_mu.to(mu.device).view(1, 1, -1)
+            prior_sigma = self.latent_prior_sigma.to(mu.device).view(1, 1, -1)
+            mu = prior_mu.expand(n_evals, self.horizon, self.action_dim).clone()
+            sigma = prior_sigma.expand(n_evals, self.horizon, self.action_dim).clone()
         return mu, sigma
 
     def plan(self, obs_0, obs_g, actions=None):
@@ -81,6 +103,16 @@ class CEMPlanner(BasePlanner):
         mu, sigma = self.init_mu_sigma(obs_0, actions)
         mu, sigma = mu.to(self.device), sigma.to(self.device)
         n_evals = mu.shape[0]
+        prior_mu = None
+        prior_sigma = None
+        if (
+            self.latent_prior_mu is not None
+            and self.latent_prior_sigma is not None
+            and self.plan_action_type == "latent"
+        ):
+            prior_mu = self.latent_prior_mu.to(self.device).view(1, 1, -1)
+            prior_sigma = self.latent_prior_sigma.to(self.device).view(1, 1, -1)
+            prior_sigma = prior_sigma.clamp_min(1e-6)
 
         for i in range(self.opt_steps):
             # optimize individual instances
@@ -105,7 +137,15 @@ class CEMPlanner(BasePlanner):
                     * sigma[traj]
                     + mu[traj]
                 )
-                action[0] = mu[traj]  # optional: make the first one mu itself
+                if self.use_prior_sampling and prior_mu is not None and prior_sigma is not None:
+                    prior_action = prior_mu + prior_sigma * torch.randn_like(action)
+                    action[0] = prior_action[0]
+                else:
+                    action[0] = mu[traj]  # optional: make the first one mu itself
+                if prior_mu is not None and prior_sigma is not None:
+                    lower = prior_mu - self.latent_prior_k * prior_sigma
+                    upper = prior_mu + self.latent_prior_k * prior_sigma
+                    action = torch.clamp(action, lower, upper)
                 with torch.no_grad():
                     i_z_obses, i_zs = self.wm.rollout(
                         obs=cur_trans_obs_0,
@@ -114,15 +154,36 @@ class CEMPlanner(BasePlanner):
                     )
 
                 loss = self.objective_fn(i_z_obses, cur_z_obs_g)
+                if (
+                    prior_mu is not None
+                    and prior_sigma is not None
+                    and self.latent_prior_lambda > 0.0
+                ):
+                    prior_penalty = (((action - prior_mu) / prior_sigma) ** 2).sum(dim=-1)
+                    prior_penalty = prior_penalty.mean(dim=-1)
+                    loss = loss + self.latent_prior_lambda * prior_penalty
                 topk_idx = torch.argsort(loss)[: self.topk]
                 topk_action = action[topk_idx]
                 losses.append(loss[topk_idx[0]].item())
                 mu[traj] = topk_action.mean(dim=0)
                 sigma[traj] = topk_action.std(dim=0)
+                if prior_mu is not None and prior_sigma is not None:
+                    lower = prior_mu.squeeze(0) - self.latent_prior_k * prior_sigma.squeeze(0)
+                    upper = prior_mu.squeeze(0) + self.latent_prior_k * prior_sigma.squeeze(0)
+                    mu[traj] = torch.clamp(mu[traj], lower, upper)
 
             self.wandb_run.log(
                 {f"{self.logging_prefix}/loss": np.mean(losses), "step": i + 1}
             )
+            if self.plan_action_type == "latent":
+                u_mean = mu.mean().item()
+                u_std = mu.std().item()
+                u_min = mu.min().item()
+                u_max = mu.max().item()
+                print(
+                    f"[{self.logging_prefix}] step={i + 1} "
+                    f"u.mean={u_mean:.4f} u.std={u_std:.4f} u.min={u_min:.4f} u.max={u_max:.4f}"
+                )
             if self.evaluator is not None and i % self.eval_every == 0:
                 logs, successes, _, _ = self.evaluator.eval_actions(
                     mu, filename=f"{self.logging_prefix}_output_{i+1}"
