@@ -100,10 +100,6 @@ def _compute_latent_prior_stats(trainer, cfg):
     #     return None
 
     model = trainer.model
-
-    prior_plan_action_type = getattr(model, "plan_action_type", None)
-    model.plan_action_type = "raw"
-
     device = trainer.accelerator.device
     loader = trainer.dataloaders["valid"]
     action_dim = int(getattr(model, "latent_action_dim", 0))
@@ -132,8 +128,6 @@ def _compute_latent_prior_stats(trainer, cfg):
             total += u_inv.shape[0] * u_inv.shape[1]
             sum_latents += u_inv.sum(dim=(0, 1))
             sumsq_latents += (u_inv ** 2).sum(dim=(0, 1))
-
-    model.plan_action_type = prior_plan_action_type
 
     mu = sum_latents / max(total, 1)
     var = (sumsq_latents / max(total, 1)) - mu ** 2
