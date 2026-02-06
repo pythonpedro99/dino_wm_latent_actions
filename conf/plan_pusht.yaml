@@ -27,7 +27,7 @@ model_name: null
 model_epoch: latest
 
 seed: 0
-n_evals: 50
+n_evals: 100
 goal_source: 'dset'
 goal_H: 5 
 n_plot_samples: 0
@@ -45,7 +45,7 @@ latent_prior:
   mu: null
   sigma: null
   k: 2.0
-  lambda: 0.01
+  lambda: 0.00
   use_prior_sampling: true
 
 objective:

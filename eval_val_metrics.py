@@ -91,19 +91,15 @@ def aggregate_epoch_log(epoch_log):
 
 
 def _compute_latent_prior_stats(trainer, cfg):
-    if not bool(getattr(cfg, "compute_prior_stats", False)):
-        print("[latent prior] skipped: set compute_prior_stats=true in config.")
-        return None
+    # if not bool(getattr(cfg, "compute_prior_stats", False)):
+    #     print("[latent prior] skipped: set compute_prior_stats=true in config.")
+    #     return None
 
-    if not getattr(trainer, "use_lam", False) or getattr(trainer, "use_vq", False):
-        print("[latent prior] skipped: requires trainer.use_lam=True and trainer.use_vq=False.")
-        return None
+    # if not getattr(trainer, "use_lam", False) or getattr(trainer, "use_vq", False):
+    #     print("[latent prior] skipped: requires trainer.use_lam=True and trainer.use_vq=False.")
+    #     return None
 
     model = trainer.model
-
-    prior_plan_action_type = getattr(model, "plan_action_type", None)
-    model.plan_action_type = "raw"
-
     device = trainer.accelerator.device
     loader = trainer.dataloaders["valid"]
     action_dim = int(getattr(model, "latent_action_dim", 0))
@@ -132,8 +128,6 @@ def _compute_latent_prior_stats(trainer, cfg):
             total += u_inv.shape[0] * u_inv.shape[1]
             sum_latents += u_inv.sum(dim=(0, 1))
             sumsq_latents += (u_inv ** 2).sum(dim=(0, 1))
-
-    model.plan_action_type = prior_plan_action_type
 
     mu = sum_latents / max(total, 1)
     var = (sumsq_latents / max(total, 1)) - mu ** 2
@@ -178,12 +172,12 @@ def main():
     assert ckpt_path.exists(), f"Checkpoint not found: {ckpt_path}"
 
     trainer.load_ckpt(ckpt_path)
-
+    trainer.model.eval()
     # clean accumulator for exact eval
     trainer.epoch_log = OrderedDict()
     print(f"Global step from checkpoint: {trainer.global_step}")
 
-    trainer.val()
+    #trainer.val()
 
     metrics = aggregate_epoch_log(trainer.epoch_log)
 
@@ -200,7 +194,7 @@ def main():
             f"ci95=±{m['ci95']:.6f} "
             f"(N={m['n']})"
         )
-
+    trainer.model.eval()
     prior_stats = _compute_latent_prior_stats(trainer, cfg)
     if prior_stats is not None:
         stats_path = run_dir / "latent_prior_stats.pt"
