@@ -172,7 +172,7 @@ def main():
     assert ckpt_path.exists(), f"Checkpoint not found: {ckpt_path}"
 
     trainer.load_ckpt(ckpt_path)
-
+    trainer.model.eval()
     # clean accumulator for exact eval
     trainer.epoch_log = OrderedDict()
     print(f"Global step from checkpoint: {trainer.global_step}")
@@ -194,7 +194,7 @@ def main():
             f"ci95=±{m['ci95']:.6f} "
             f"(N={m['n']})"
         )
-
+    trainer.model.eval()
     prior_stats = _compute_latent_prior_stats(trainer, cfg)
     if prior_stats is not None:
         stats_path = run_dir / "latent_prior_stats.pt"
