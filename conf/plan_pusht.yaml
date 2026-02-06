@@ -45,7 +45,7 @@ latent_prior:
   mu: null
   sigma: null
   k: 2.0
-  lambda: 0.01
+  lambda: 0.00
   use_prior_sampling: true
 
 objective:
