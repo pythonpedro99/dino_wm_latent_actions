@@ -13,7 +13,7 @@ from utils import (
     concat_trajdict,
 )
 from torchvision import utils
-from models.action_decoder import MacroActionDecoder
+from models.action_decoder import MacroActionDecoderStd
 
 
 class PlanEvaluator:  # evaluator for planning
@@ -132,7 +132,7 @@ class PlanEvaluator:  # evaluator for planning
                     "plan_action_type requires an action_decoder for env rollout, but none was provided."
                 )
             with torch.no_grad():
-                if isinstance(self.action_decoder, MacroActionDecoder):
+                if isinstance(self.action_decoder, MacroActionDecoderStd):
                     print(f"[macro] i_z_obses['visual']: shape={tuple(i_z_obses['visual'].shape)} env_actions(latent): shape={tuple(env_actions.shape)} frameskip={self.frameskip}")
                     env_actions = self._decode_macro_actions(
                         i_z_obses["visual"],

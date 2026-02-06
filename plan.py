@@ -20,7 +20,7 @@ from env.venv import SubprocVectorEnv
 from custom_resolvers import replace_slash
 from preprocessor import Preprocessor
 from planning.evaluator import PlanEvaluator
-from models.action_decoder import MacroActionDecoder
+from models.action_decoder import MacroActionDecoderStd
 from utils import cfg_to_dict, seed
 from typing import Any, Iterable
 
@@ -576,16 +576,16 @@ def load_model(
     model.eval()
 
     if plan_action_type in {"latent", "discrete"}:
-        action_decoder = MacroActionDecoder(
+        action_decoder = MacroActionDecoderStd(
             token_dim=int(getattr(encoder, "emb_dim")),
             z_dim=int(model_cfg.model.latent_action_dim),
             out_dim=int(2 * int(model_cfg.dataset.frameskip)),
-            disable_e=bool(cfg_dict.get("action_decoder_disable_e", True)),
-            disable_delta=bool(cfg_dict.get("action_decoder_disable_delta", False)),
-            disable_z=bool(cfg_dict.get("action_decoder_disable_z", False)),
+            use_e=bool(cfg_dict.get("use_e", True)),
+            use_delta=bool(cfg_dict.get("use_delta", False)),
+            use_z=bool(cfg_dict.get("use_z", True)),
         )
-        if "action_decoder" in result:
-            action_decoder.load_state_dict(result["action_decoder"], strict=True)
+        if "action_decoder_100000" in result:
+            action_decoder.load_state_dict(result["action_decoder_100000"], strict=True)
         action_decoder.to(device)
         action_decoder.eval()
     return model, action_decoder

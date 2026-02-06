@@ -22,24 +22,31 @@ hydra:
             "export MASTER_PORT=$(for port in $(shuf -i 30000-65500 -n 20); do if [[ $(netstat -tupln 2>&1 | grep $port | wc -l) -eq 0 ]] ; then echo $port; break; fi; done;)",]
 
 # model to load for planning
-ckpt_base_path: /content/drive/MyDrive/DINO-WM/LatentActionVQModel/LatentActionVQModel/outputs/2026-01-29/08-55-20  # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
+ckpt_base_path:   # put absolute path here. Checkpoints will be loaded from ${ckpt_base_path}/outputs
 model_name: null
 model_epoch: latest
 
 seed: 0
-n_evals: 1
+n_evals: 50
 goal_source: 'dset'
 goal_H: 5 
 n_plot_samples: 0
 use_action_encoder: false   # True for baseline
 use_lam: true   # false for raw, true for discrete and latent
-use_vq: true   #  false for raw, true for discrete
+use_vq: false   #  false for raw, true for discrete
 is_training: false # always false 
-plan_action_type: "discrete"  # "raw" or "latent" or "discrete" | raw = baseline, always run with use_action_encoder=True
-action_decoder_disable_e: true
-action_decoder_disable_z: false
-action_decoder_disable_deltas: false
+plan_action_type: "latent"  # "raw" or "latent" or "discrete" | raw = baseline, always run with use_action_encoder=True
+use_e: true
+use_z: true
+use_delta: false
 debug_dset_init: False
+
+latent_prior:
+  mu: null
+  sigma: null
+  k: 2.0
+  lambda: 0.01
+  use_prior_sampling: true
 
 objective:
   _target_: planning.objectives.create_objective_fn
@@ -48,20 +55,28 @@ objective:
   mode: last
 
 planner:
-  _target_: planning.discrete_cem.DiscreteCEMPlanner
-  horizon: 5
-  topk: 30
-  num_samples: 300
-  var_scale: 1
-  opt_steps: 10
-  eval_every: 1
-  pseudocount: 1.0
-  momentum: 0.7
-  min_prob: 0.001
-  init_smoothing: 0.05
-  sample_temperature: 1.0
-  use_mode_as_first_sample: false
-  return_mode: false
-  name: discrete_cem
-
+  _target_: planning.mpc.MPCPlanner
+  max_iter: 10 
+  n_taken_actions: 5
+  sub_planner:
+    target: planning.cem.CEMPlanner
+    horizon: 5
+    topk: 30
+    num_samples: 300
+    var_scale: 1
+    opt_steps: 10
+    eval_every: 1
+    latent_prior_mu: ${latent_prior.mu}
+    latent_prior_sigma: ${latent_prior.sigma}
+    latent_prior_k: ${latent_prior.k}
+    latent_prior_lambda: ${latent_prior.lambda}
+    use_prior_sampling: ${latent_prior.use_prior_sampling}
+    pseudocount: 1.0
+    momentum: 0.7
+    min_prob: 0.001
+    init_smoothing: 0.05
+    sample_temperature: 1.5
+    use_mode_as_first_sample: false
+    return_mode: false
+  name: mpc_cem
 
