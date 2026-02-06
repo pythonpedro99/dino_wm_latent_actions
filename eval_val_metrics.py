@@ -91,13 +91,13 @@ def aggregate_epoch_log(epoch_log):
 
 
 def _compute_latent_prior_stats(trainer, cfg):
-    if not bool(getattr(cfg, "compute_prior_stats", False)):
-        print("[latent prior] skipped: set compute_prior_stats=true in config.")
-        return None
+    # if not bool(getattr(cfg, "compute_prior_stats", False)):
+    #     print("[latent prior] skipped: set compute_prior_stats=true in config.")
+    #     return None
 
-    if not getattr(trainer, "use_lam", False) or getattr(trainer, "use_vq", False):
-        print("[latent prior] skipped: requires trainer.use_lam=True and trainer.use_vq=False.")
-        return None
+    # if not getattr(trainer, "use_lam", False) or getattr(trainer, "use_vq", False):
+    #     print("[latent prior] skipped: requires trainer.use_lam=True and trainer.use_vq=False.")
+    #     return None
 
     model = trainer.model
 
@@ -183,7 +183,7 @@ def main():
     trainer.epoch_log = OrderedDict()
     print(f"Global step from checkpoint: {trainer.global_step}")
 
-    trainer.val()
+    #trainer.val()
 
     metrics = aggregate_epoch_log(trainer.epoch_log)
 
