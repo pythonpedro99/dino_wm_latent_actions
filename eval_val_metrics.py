@@ -159,10 +159,9 @@ def main():
 
     ensure_hydra_config(run_dir)
 
-    # Import Trainer AFTER sys.path is correct (assumes you run from repo root or have module path)
-    # If Trainer is not in train.py, change this import accordingly.
+    
     add_repo_to_syspath()
-    from dino_wm_latent_actions.train import Trainer  # <-- adjust if needed
+    from train import Trainer  
 
     trainer = Trainer(cfg)
 
