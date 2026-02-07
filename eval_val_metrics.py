@@ -177,7 +177,7 @@ def main():
     trainer.epoch_log = OrderedDict()
     print(f"Global step from checkpoint: {trainer.global_step}")
 
-    #trainer.val()
+    trainer.val()
 
     metrics = aggregate_epoch_log(trainer.epoch_log)
 
@@ -195,7 +195,7 @@ def main():
             f"(N={m['n']})"
         )
     trainer.model.eval()
-    prior_stats = _compute_latent_prior_stats(trainer, cfg)
+    prior_stats = None # _compute_latent_prior_stats(trainer, cfg)
     if prior_stats is not None:
         stats_path = run_dir / "latent_prior_stats.pt"
         torch.save(prior_stats, stats_path)
