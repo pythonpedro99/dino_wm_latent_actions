@@ -1,6 +1,6 @@
 # Action-Label-Free World-Model Planning: Extending DINO-WM with Inverse Dynamics
 
-![teaser_figure](assets/training_architecture.png) Example input images are from [Zhou et al., 2024](https://arxiv.org/abs/2503.18938).
+![teaser_figure](assets/training_architecture.png) Example input images are from [Zhou et al., 2024](https://arxiv.org/abs/2411.04983).
 
 World models enable agents to predict the consequences of their actions and plan in imagined
 futures. Recent work combines large-scale self-supervised visual encoders with action-conditioned
@@ -42,7 +42,7 @@ between learned action codes, long-horizon rollouts, and downstream decoding.
 ### Use of Third-Party Code and AI Tools
 
 This repository is based on a fork of the official **DINO-WM** implementation:  
-- [Zhou et al., 2024](https://arxiv.org/abs/2503.18938)
+- [Zhou et al., 2024](https://arxiv.org/abs/2411.04983)
 - [Github](https://github.com/gaoyuezhou/dino_wm)
 
 
