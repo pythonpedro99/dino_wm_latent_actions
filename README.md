@@ -140,6 +140,8 @@ os.environ['DATASET_DIR'] = '<path/to/dataset>'
 ```
 
 **LA:**
+
+```bash
 RUN_DIR="path/to/LA model checkpoint"
 
 micromamba run -n dino-wm-latent-actions \
@@ -151,8 +153,10 @@ micromamba run -n dino-wm-latent-actions \
     --seed 0 \
     --use_e \
     --use_z
-
+```
 **LA-VQ:**
+
+```bash
 RUN_DIR="path/to/LA-VQ model checkpoint"
 
 micromamba run -n dino-wm-latent-actions \
@@ -164,9 +168,9 @@ micromamba run -n dino-wm-latent-actions \
     --seed 0 \
     --use_e \
     --use_z
+```
 
-
-if you want to run the decoder training with different args checkout the train_action_decoder.py main()
+If you want to run the decoder training with different args checkout the train_action_decoder.py main().
 
 ---
 
