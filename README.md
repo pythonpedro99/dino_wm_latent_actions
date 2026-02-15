@@ -41,13 +41,16 @@ between learned action codes, long-horizon rollouts, and downstream decoding.
 
 ### Use of Third-Party Code and AI Tools
 
-This repository is based on a fork of the official **DINO-WM** implementation  
-([Zhou et al., 2024](https://arxiv.org/abs/2503.18938).
+This repository is based on a fork of the official **DINO-WM** implementation:  
+- [Zhou et al., 2024](https://arxiv.org/abs/2503.18938)
+- [Github](https://github.com/gaoyuezhou/dino_wm)
 
-Parts of the latent action model implementation are adapted from **AdaWorld**  
-([Gao et al., 2025](https://arxiv.org/abs/)).
 
-Additional code changes and implementations were developed with the assistance of AI tools, including ChatGPT 5.2 and Codex (OpenAI). The author retains full responsibility for the final code.
+Parts of the latent action model implementation are adapted from **AdaWorld**:  
+- [Gao et al., 2025](https://arxiv.org/abs/)
+- [Github](https://github.com/Little-Podi/AdaWorld)
+
+For joint development and implementation, I used ChatGPT (OpenAI, Version 5.2, Codex).
 
 ---
 
