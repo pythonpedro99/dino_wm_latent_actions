@@ -159,10 +159,9 @@ def main():
 
     ensure_hydra_config(run_dir)
 
-    # Import Trainer AFTER sys.path is correct (assumes you run from repo root or have module path)
-    # If Trainer is not in train.py, change this import accordingly.
+    
     add_repo_to_syspath()
-    from dino_wm_latent_actions.train import Trainer  # <-- adjust if needed
+    from train import Trainer  
 
     trainer = Trainer(cfg)
 
@@ -195,8 +194,7 @@ def main():
             f"(N={m['n']})"
         )
     trainer.model.eval()
-    prior_stats = None
-    #prior_stats = _compute_latent_prior_stats(trainer, cfg)
+    prior_stats = None # _compute_latent_prior_stats(trainer, cfg)
     if prior_stats is not None:
         stats_path = run_dir / "latent_prior_stats.pt"
         torch.save(prior_stats, stats_path)

@@ -198,7 +198,7 @@ class Trainer:
         self.dataloaders = {
             "train": torch.utils.data.DataLoader(
                 self.datasets["train"],
-                batch_size=1024,
+                batch_size=self.cfg.gpu_batch_size,
                 shuffle=True,
                 generator=g_train,
                 num_workers=self.cfg.env.num_workers,
@@ -209,7 +209,7 @@ class Trainer:
             ),
             "valid": torch.utils.data.DataLoader(
                 self.datasets["valid"],
-                batch_size=1024,
+                batch_size=self.cfg.gpu_batch_size,
                 shuffle=True,
                 generator=g_train,
                 num_workers=0,
@@ -1016,8 +1016,14 @@ class Trainer:
         if self.accelerator.is_main_process and len(self.train_traj_dset) > 0 and self.cfg.model.has_predictor:
             with torch.no_grad():
                 logs = self.openloop_rollout(self.val_traj_dset, mode="val")
-                logs = {f"val_{k}": [float(v.detach().mean().cpu()) if torch.is_tensor(v) else float(v)]
-                        for k, v in logs.items()}
+                logs = {
+                    f"val_{k}": [
+                        float(v.detach().cpu()) if torch.is_tensor(v) else float(v)
+                        for v in values
+                    ]
+                    for k, values in logs.items()
+                }
+
                 self.logs_update(logs)
 
 
@@ -1158,7 +1164,7 @@ class Trainer:
 
 
     def openloop_rollout(
-            self, dset, num_rollout=10, rand_start_end=True, min_horizon=5, mode="train"
+            self, dset, num_rollout=600, rand_start_end=True, min_horizon=5, mode="train"
         ):
         np.random.seed(self.cfg.training.seed)
         min_horizon = min_horizon + self.cfg.model.num_hist
@@ -1234,9 +1240,6 @@ class Trainer:
                         f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}.png",
                     )
 
-        logs = {
-            key: sum(values) / len(values) for key, values in logs.items() if values
-        }
         return logs
     
     def _append_vq_idx(self, vq_idx: torch.Tensor):
@@ -1419,14 +1422,22 @@ class Trainer:
 
     def logs_update(self, logs):
         for key, value in logs.items():
+            # value should be a list of floats
             if isinstance(value, torch.Tensor):
-                value = value.detach().cpu().item()
+                value = value.detach().cpu().tolist()
+
             length = len(value)
-            count, total = self.epoch_log.get(key, (0, 0.0))
-            self.epoch_log[key] = (
-                count + length,
-                total + sum(value),
-            )
+            s = sum(value)
+            ssq = sum(v * v for v in value)
+
+            if key not in self.epoch_log:
+                # count, sum, sumsq
+                self.epoch_log[key] = [0, 0.0, 0.0]
+
+            self.epoch_log[key][0] += length
+            self.epoch_log[key][1] += s
+            self.epoch_log[key][2] += ssq
+
 
     def logs_flash(self, step):
         epoch_log = OrderedDict()
