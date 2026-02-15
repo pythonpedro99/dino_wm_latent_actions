@@ -273,7 +273,7 @@ micromamba run -n dino-wm-latent-actions \
 
 ---
 
-### Notes: The default num_rollouts for Rollout MSE is 600. If you dont need Rollouts during val reduce it. If you train the action decoder you can increase the train and val batch size (1024) to speed up cache sampling. 
+ **Notes:** The default num_rollouts for Rollout MSE is 600. If you dont need Rollouts during val reduce it. If you train the action decoder you can increase the train and val batch size (1024) to speed up cache sampling. 
 
 ### Citation
 
