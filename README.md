@@ -47,7 +47,7 @@ This repository is based on a fork of the official **DINO-WM** implementation:
 
 
 Parts of the latent action model implementation are adapted from **AdaWorld**:  
-- [Gao et al., 2025](https://arxiv.org/abs/)
+- [Gao et al., 2025](https://arxiv.org/abs/2503.18938)
 - [Github](https://github.com/Little-Podi/AdaWorld)
 
 For joint development and implementation, I used ChatGPT (OpenAI, Version 5.2, Codex).
