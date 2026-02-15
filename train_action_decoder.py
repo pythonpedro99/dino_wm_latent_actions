@@ -601,7 +601,7 @@ def main():
     ap.add_argument("--run_dir", type=str, help="Path to Hydra run directory.")
     ap.add_argument("--ckpt", type=str, required=True, help="Checkpoint filename or absolute path.")
     ap.add_argument("--latent_source", type=str, default="continuous", choices=["continuous", "vq"])
-    ap.add_argument("--train_pairs", type=str, default="50000")
+    ap.add_argument("--train_pairs", type=str, default="100000")
     ap.add_argument("--val_pairs", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=None, help="Random seed (defaults to cfg.training.seed when available).")
 
@@ -626,7 +626,7 @@ def main():
     # cache / dataloader knobs
     ap.add_argument("--pair_cache_dir", type=str, default="macro_pair_cache", help="Directory under run_dir to store memmap cache.")
     ap.add_argument("--rebuild_cache", action="store_true", help="Delete and rebuild cached pairs.")
-    ap.add_argument("--loader_workers", type=int, default=2, help="DataLoader workers for memmap dataset.")
+    ap.add_argument("--loader_workers", type=int, default=4, help="DataLoader workers for memmap dataset.")
     ap.add_argument("--no_pin_memory", action="store_true", help="Disable pin_memory for memmap loaders.")
 
     args = ap.parse_args()
