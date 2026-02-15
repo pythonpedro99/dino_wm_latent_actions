@@ -176,7 +176,7 @@ If you want to run the decoder training with different args checkout the train_a
 
 ### Planning with the Variants
 
-If you want to train with a different config change the plan_pusht.yaml file.
+If you want to plan with a different config change the plan_pusht.yaml file.
 
 ```bash
 os.environ['DATASET_DIR'] = '<path/to/dataset>'
