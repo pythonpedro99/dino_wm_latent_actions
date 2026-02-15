@@ -1,6 +1,6 @@
 # Action-Label-Free World-Model Planning: Extending DINO-WM with Inverse Dynamics
 
-![teaser_figure](assets/training_architecture.png)
+![teaser_figure](assets/training_architecture.png) Example input images are from [Zhou et al., 2024](https://arxiv.org/abs/2503.18938).
 
 World models enable agents to predict the consequences of their actions and plan in imagined
 futures. Recent work combines large-scale self-supervised visual encoders with action-conditioned
