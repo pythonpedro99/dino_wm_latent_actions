@@ -41,8 +41,6 @@ between learned action codes, long-horizon rollouts, and downstream decoding.
 
 ### Use of Third-Party Code and AI Tools
 
-## Code Base and Attribution
-
 This repository is based on a fork of the official **DINO-WM** implementation  
 ([Zhou et al., 2024](https://arxiv.org/abs/2503.18938).
 
