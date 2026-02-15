@@ -35,6 +35,13 @@ n_plot_samples: 10
 
 debug_dset_init: False
 
+latent_prior:
+  mu: null
+  sigma: null
+  k: 2.0
+  lambda: 0.01
+  use_prior_sampling: true
+
 objective:
   _target_: planning.objectives.create_objective_fn
   alpha: 1

@@ -210,7 +210,8 @@ class Trainer:
             "valid": torch.utils.data.DataLoader(
                 self.datasets["valid"],
                 batch_size=self.cfg.gpu_batch_size,
-                shuffle=False,
+                shuffle=True,
+                generator=g_train,
                 num_workers=0,
                 prefetch_factor=None,
                 collate_fn=None,
@@ -861,22 +862,11 @@ class Trainer:
             }
 
             # ---- collapse metrics ----
-            if self.use_lam:
+            if encode_output.get("z") is not None:
                 was_training = self.model.training
                 self.model.eval()
                 with torch.no_grad():
-                    
-                    z = encode_output["z"].detach()             # [B,T,P',D']
-                    z_src = z[:, : self.model.num_hist]         # [B,H,P',D']
-                    z_tgt = z[:, self.model.num_pred :]         # [B,H,P',D']
-
-                    # base action vectors aligned with history axis H
-                    if self.model.use_vq and (encode_output.get("quantized_latent_actions") is not None):
-                        act_base_h = encode_output["quantized_latent_actions"][:, : self.model.num_hist]
-                    elif (encode_output.get("latent_actions") is not None):
-                        act_base_h = encode_output["latent_actions"][:, : self.model.num_hist]
-                    else:
-                        _, act_base_h = self.model.separate_emb(z_src)
+                    z_src, z_tgt, act_base_h = self._extract_lam_eval_tensors(encode_output)
 
                    
                     # ----------------------------
@@ -1017,12 +1007,23 @@ class Trainer:
 
     def val(self):
         self.model.eval()
+        val_swap_scores = []
+        val_shuffle_deltas = []
+        val_mse_base = []
+        val_mse_shuf = []
+        val_vq_counts = None
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process and len(self.train_traj_dset) > 0 and self.cfg.model.has_predictor:
             with torch.no_grad():
                 logs = self.openloop_rollout(self.val_traj_dset, mode="val")
-                logs = {f"val_{k}": [float(v.detach().mean().cpu()) if torch.is_tensor(v) else float(v)]
-                        for k, v in logs.items()}
+                logs = {
+                    f"val_{k}": [
+                        float(v.detach().cpu()) if torch.is_tensor(v) else float(v)
+                        for v in values
+                    ]
+                    for k, values in logs.items()
+                }
+
                 self.logs_update(logs)
 
 
@@ -1048,6 +1049,34 @@ class Trainer:
                 loss_components = {
                     key: value.mean().item() for key, value in loss_components.items()
                 }
+
+                if encode_output.get("z") is not None:
+                    z_src, z_tgt, act_base_h = self._extract_lam_eval_tensors(encode_output)
+                    swap_s = float(self.metric_z_swap_score(z_src, z_tgt, act_base_h))
+                    delta, mse_base, mse_shuf = self.metric_action_shuffle_delta(z_src, z_tgt, act_base_h)
+
+                    swap_metrics = torch.tensor(
+                        [[swap_s, float(delta), float(mse_base), float(mse_shuf)]],
+                        device=self.device,
+                    )
+                    swap_metrics = self.accelerator.gather_for_metrics(swap_metrics)
+                    swap_mean = swap_metrics.mean(dim=0)
+                    val_swap_scores.append(float(swap_mean[0].item()))
+                    val_shuffle_deltas.append(float(swap_mean[1].item()))
+                    val_mse_base.append(float(swap_mean[2].item()))
+                    val_mse_shuf.append(float(swap_mean[3].item()))
+
+                if self.model.use_vq and (encode_output.get("vq_outputs") is not None):
+                    vq_idx = encode_output["vq_outputs"].get("indices", None)
+                    if vq_idx is not None:
+                        idx = vq_idx.detach().reshape(-1).to(torch.long)
+                        batch_counts = torch.bincount(idx, minlength=self.codebook_size).float().unsqueeze(0)
+                        batch_counts = self.accelerator.gather_for_metrics(batch_counts)
+                        batch_counts = batch_counts.sum(dim=0).to("cpu")
+                        if val_vq_counts is None:
+                            val_vq_counts = batch_counts
+                        else:
+                            val_vq_counts += batch_counts
 
                 if self.cfg.model.has_decoder and plot:
                     # only eval images when plotting due to speed
@@ -1107,9 +1136,35 @@ class Trainer:
                 loss_components = {f"val_{k}": [v] for k, v in loss_components.items()}
                 self.logs_update(loss_components)
 
+            if val_swap_scores:
+                self.logs_update(
+                    {
+                        "val_swap_s": [sum(val_swap_scores) / len(val_swap_scores)],
+                        "val_shuffle_delta": [sum(val_shuffle_deltas) / len(val_shuffle_deltas)],
+                        "val_mse_base": [sum(val_mse_base) / len(val_mse_base)],
+                        "val_mse_shuf": [sum(val_mse_shuf) / len(val_mse_shuf)],
+                    }
+                )
+
+            if val_vq_counts is not None:
+                vq_total = float(val_vq_counts.sum().item())
+                if vq_total > 0:
+                    p = val_vq_counts / vq_total
+                    entropy = -(p * (p + 1e-8).log()).sum().item()
+                    val_ppl = math.exp(entropy)
+                    val_ppl_norm = val_ppl / float(self.codebook_size)
+                    val_dead_rate = float(1.0 - (val_vq_counts > 0).float().mean().item())
+                    self.logs_update(
+                        {
+                            "val_ppl": [float(val_ppl)],
+                            "val_ppl_norm": [float(val_ppl_norm)],
+                            "val_dead_rate": [float(val_dead_rate)],
+                        }
+                    )
+
 
     def openloop_rollout(
-            self, dset, num_rollout=10, rand_start_end=True, min_horizon=5, mode="train"
+            self, dset, num_rollout=600, rand_start_end=True, min_horizon=5, mode="train"
         ):
         np.random.seed(self.cfg.training.seed)
         min_horizon = min_horizon + self.cfg.model.num_hist
@@ -1185,9 +1240,6 @@ class Trainer:
                         f"{plotting_dir}/e{self.epoch}_{mode}_{idx}{postfix}.png",
                     )
 
-        logs = {
-            key: sum(values) / len(values) for key, values in logs.items() if values
-        }
         return logs
     
     def _append_vq_idx(self, vq_idx: torch.Tensor):
@@ -1205,6 +1257,20 @@ class Trainer:
         # shuffle_u_threshold: 0.05 (<) => bad if delta < 0.05
         # shuffle_z_threshold: 0.65 (>) => bad if swap_s > 0.65
         return (shuffle_delta < self.shuffle_u_threshold) or (swap_s > self.shuffle_z_threshold)
+
+    def _extract_lam_eval_tensors(self, encode_output):
+        z = encode_output["z"].detach()                 # [B,T,P',D']
+        z_src = z[:, : self.model.num_hist]             # [B,H,P',D']
+        z_tgt = z[:, self.model.num_pred :]             # [B,H,P',D']
+
+        if self.model.use_vq and (encode_output.get("quantized_latent_actions") is not None):
+            act_base_h = encode_output["quantized_latent_actions"][:, : self.model.num_hist]
+        elif encode_output.get("latent_actions") is not None:
+            act_base_h = encode_output["latent_actions"][:, : self.model.num_hist]
+        else:
+            _, act_base_h = self.model.separate_emb(z_src)
+
+        return z_src, z_tgt, act_base_h
     
     @torch.no_grad()
     def metric_z_swap_score(self, z_src, z_tgt, act_base_h) -> float:
@@ -1356,14 +1422,22 @@ class Trainer:
 
     def logs_update(self, logs):
         for key, value in logs.items():
+            # value should be a list of floats
             if isinstance(value, torch.Tensor):
-                value = value.detach().cpu().item()
+                value = value.detach().cpu().tolist()
+
             length = len(value)
-            count, total = self.epoch_log.get(key, (0, 0.0))
-            self.epoch_log[key] = (
-                count + length,
-                total + sum(value),
-            )
+            s = sum(value)
+            ssq = sum(v * v for v in value)
+
+            if key not in self.epoch_log:
+                # count, sum, sumsq
+                self.epoch_log[key] = [0, 0.0, 0.0]
+
+            self.epoch_log[key][0] += length
+            self.epoch_log[key][1] += s
+            self.epoch_log[key][2] += ssq
+
 
     def logs_flash(self, step):
         epoch_log = OrderedDict()

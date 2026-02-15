@@ -61,6 +61,7 @@ model:
   has_predictor: True 
   has_decoder: False 
   plan_action_type: raw  # always use raw for training
+  compute_prior_stats: false  #default false 
   is_training: true      # always true
 
   train_encoder: false

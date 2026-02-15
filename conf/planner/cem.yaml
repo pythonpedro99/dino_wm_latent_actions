@@ -5,5 +5,10 @@ num_samples: 300
 var_scale: 1
 opt_steps: 30
 eval_every: 1
+latent_prior_mu: ${latent_prior.mu}
+latent_prior_sigma: ${latent_prior.sigma}
+latent_prior_k: ${latent_prior.k}
+latent_prior_lambda: ${latent_prior.lambda}
+use_prior_sampling: ${latent_prior.use_prior_sampling}
 
 name: cem

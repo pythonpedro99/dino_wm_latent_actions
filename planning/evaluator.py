@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn.functional as F
 import imageio
 import numpy as np
 from einops import rearrange, repeat
@@ -12,6 +13,7 @@ from utils import (
     concat_trajdict,
 )
 from torchvision import utils
+from models.action_decoder import MacroActionDecoderStd
 
 
 class PlanEvaluator:  # evaluator for planning
@@ -104,6 +106,7 @@ class PlanEvaluator:  # evaluator for planning
         n_evals = actions.shape[0]
         if action_len is None:
             action_len = np.full(n_evals, np.inf)
+            
         # rollout in wm
         trans_obs_0 = move_to_device(
             self.preprocessor.transform_obs(self.obs_0), self.device
@@ -118,8 +121,10 @@ class PlanEvaluator:  # evaluator for planning
                 num_obs_init=self.wm.num_hist
             )
         i_final_z_obs = self._get_trajdict_last(i_z_obses, action_len + 1)
+        z_obs_g = self.wm.encode_obs(trans_obs_g)
 
         # rollout in env
+        print(f"[pre-decode] actions: shape={tuple(actions.shape)} dtype={actions.dtype} device={actions.device} min={actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} max={actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} mean={actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} std={actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} nan={torch.isnan(actions).sum().item()} inf={torch.isinf(actions).sum().item()}")
         env_actions = actions
         if self.plan_action_type in {"latent", "discrete"}:
             if self.action_decoder is None:
@@ -127,13 +132,41 @@ class PlanEvaluator:  # evaluator for planning
                     "plan_action_type requires an action_decoder for env rollout, but none was provided."
                 )
             with torch.no_grad():
-                env_actions = self.action_decoder(env_actions)
-        
-        
+                if isinstance(self.action_decoder, MacroActionDecoderStd):
+                    print(f"[macro] i_z_obses['visual']: shape={tuple(i_z_obses['visual'].shape)} env_actions(latent): shape={tuple(env_actions.shape)} frameskip={self.frameskip}")
+                    env_actions = self._decode_macro_actions(
+                        i_z_obses["visual"],
+                        env_actions,
+                    )
+                    print(f"[post-decode] env_actions: shape={tuple(env_actions.shape)} dtype={env_actions.dtype} device={env_actions.device} min={env_actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} max={env_actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} mean={env_actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} std={env_actions.detach().nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} nan={torch.isnan(env_actions).sum().item()} inf={torch.isinf(env_actions).sum().item()}")
+                else:
+                    env_actions = self.action_decoder(env_actions)
+
+
         exec_actions = rearrange(
             env_actions.detach().cpu(), "b t (f d) -> b (t f) d", f=self.frameskip
-             )
-        exec_actions = self.preprocessor.denormalize_actions(exec_actions).numpy()
+        )
+        print(
+            f"[pre-denorm] exec_actions(tensor): shape={tuple(exec_actions.shape)} dtype={exec_actions.dtype} device={exec_actions.device} "
+            f"min={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} "
+            f"max={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} "
+            f"mean={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} "
+            f"std={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} "
+            f"nan={torch.isnan(exec_actions).sum().item()} inf={torch.isinf(exec_actions).sum().item()}"
+        )
+
+        exec_actions = self.preprocessor.denormalize_actions(exec_actions)
+        print(
+            f"[post-denorm] exec_actions(tensor): shape={tuple(exec_actions.shape)} dtype={exec_actions.dtype} device={exec_actions.device} "
+            f"min={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).min().item():.6g} "
+            f"max={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).max().item():.6g} "
+            f"mean={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).mean().item():.6g} "
+            f"std={exec_actions.nan_to_num(nan=0.0,posinf=0.0,neginf=0.0).std(unbiased=False).item():.6g} "
+            f"nan={torch.isnan(exec_actions).sum().item()} inf={torch.isinf(exec_actions).sum().item()}"
+        )
+
+        exec_actions = exec_actions.cpu().numpy()
+
         e_obses, e_states = self.env.rollout(self.seed, self.state_0, exec_actions)
         e_visuals = e_obses["visual"]
         e_final_obs = self._get_trajdict_last(e_obses, action_len * self.frameskip + 1)
@@ -146,6 +179,7 @@ class PlanEvaluator:  # evaluator for planning
             e_state=e_final_state,
             e_obs=e_final_obs,
             i_z_obs=i_final_z_obs,
+            z_obs_g=z_obs_g,
         )
 
         # plot trajs
@@ -166,7 +200,22 @@ class PlanEvaluator:  # evaluator for planning
 
         return logs, successes, e_obses, e_states
 
-    def _compute_rollout_metrics(self, e_state, e_obs, i_z_obs):
+    def _decode_macro_actions(self, visual_tokens, z_actions):
+        if visual_tokens.shape[1] < z_actions.shape[1] + 1:
+            raise ValueError(
+                "Not enough rollout frames to decode actions: "
+                f"got {visual_tokens.shape[1]} frames for {z_actions.shape[1]} actions."
+            )
+        batch_size, horizon = z_actions.shape[:2]
+        p_t = visual_tokens[:, :horizon]
+        p_t1 = visual_tokens[:, 1 : horizon + 1]
+        p_t = p_t.reshape(batch_size * horizon, *p_t.shape[2:])
+        p_t1 = p_t1.reshape(batch_size * horizon, *p_t1.shape[2:])
+        z_flat = z_actions.reshape(batch_size * horizon, z_actions.shape[-1])
+        decoded_flat = self.action_decoder(p_t, p_t1, z_flat)
+        return decoded_flat.reshape(batch_size, horizon, -1)
+
+    def _compute_rollout_metrics(self, e_state, e_obs, i_z_obs, z_obs_g):
         """
         Args
             e_state
@@ -193,12 +242,15 @@ class PlanEvaluator:  # evaluator for planning
         e_obs = move_to_device(self.preprocessor.transform_obs(e_obs), self.device)
         e_z_obs = self.wm.encode_obs(e_obs)
         div_visual_emb = torch.norm(e_z_obs["visual"] - i_z_obs["visual"]).item()
+        goal_emb_mse = F.mse_loss(i_z_obs["visual"], z_obs_g["visual"]).item()
+        goal_emb_l2 = torch.norm(i_z_obs["visual"] - z_obs_g["visual"]).item()
 
         logs.update({
                 "mean_pixel_l2": mean_visual_dist,
-                "mean_emb_l2": div_visual_emb,
-            })
+                "mean_wm_env_emb_l2": div_visual_emb,
+                "mean_wm_emb_l2": goal_emb_l2,
 
+            })
         return logs, successes
 
     def _plot_rollout_compare(
